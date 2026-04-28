@@ -13,6 +13,14 @@ try:
 except Exception:  # pragma: no cover - safe fallback when dependency is absent
     OpenAI = None  # type: ignore[assignment]
 
+try:
+    import streamlit as st
+except Exception:  # pragma: no cover - safe fallback when dependency is absent
+    st = None  # type: ignore[assignment]
+
+
+DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+
 
 @dataclass
 class GenerationOptions:
@@ -29,7 +37,17 @@ class GenerationOptions:
 
 def is_openai_configured() -> bool:
     """Return True when the OpenAI SDK and API key are both available."""
-    return OpenAI is not None and bool(os.getenv("OPENAI_API_KEY"))
+    return OpenAI is not None and bool(get_openai_api_key())
+
+
+def get_openai_api_key() -> str:
+    """Read the OpenAI API key from env vars or Streamlit secrets."""
+    return _get_runtime_config("OPENAI_API_KEY")
+
+
+def get_openai_model() -> str:
+    """Read the preferred model from env vars or Streamlit secrets."""
+    return _get_runtime_config("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
 
 
 def summarize_chunks(chunks: list[str], options: GenerationOptions) -> list[str]:
@@ -163,9 +181,9 @@ Chunk summaries:
 
 
 def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -> str:
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = OpenAI(api_key=get_openai_api_key())
     response = client.responses.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
+        model=get_openai_model(),
         max_output_tokens=max_output_tokens,
         input=[
             {
@@ -191,6 +209,42 @@ def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -
                 parts.append(text)
 
     return "\n".join(parts).strip()
+
+
+def _get_runtime_config(name: str) -> str:
+    env_value = os.getenv(name, "").strip()
+    if env_value:
+        return env_value
+
+    secret_value = _read_streamlit_secret(name)
+    if secret_value:
+        return secret_value
+
+    nested_key = {
+        "OPENAI_API_KEY": "api_key",
+        "OPENAI_MODEL": "model",
+    }.get(name)
+    if nested_key:
+        return _read_streamlit_secret("openai", nested_key)
+
+    return ""
+
+
+def _read_streamlit_secret(*keys: str) -> str:
+    if st is None:
+        return ""
+
+    try:
+        value = st.secrets
+        for key in keys:
+            value = value[key]
+    except Exception:
+        return ""
+
+    if value is None:
+        return ""
+
+    return str(value).strip()
 
 
 def _heuristic_chunk_summary(chunk: str, options: GenerationOptions, chunk_index: int) -> str:

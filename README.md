@@ -1,30 +1,65 @@
 # Cheatsheet AI Assistant
 
-Cheatsheet AI Assistant is a practical Streamlit prototype that turns lecture slides, notes, PDFs, and documents into a compact, exam-oriented cheat sheet.
+Cheatsheet AI Assistant is a Streamlit app that turns lecture slides, notes, PDFs, and documents into a compact, exam-oriented cheat sheet.
 
-It is designed for messy student materials:
+## 快速开始
 
-- Upload one or more `PDF`, `PPTX`, `DOCX`, or `TXT` files
-- Extract and clean noisy lecture content
-- Chunk long materials before summarizing
-- Generate a dense cheat sheet tuned for exam prep
-- Preview and edit the result inside the app
-- Export the final version as Markdown, PDF, or DOCX
+推荐直接使用项目里已经补好的 `Makefile`：
 
-## Features
+```bash
+make install
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+make run
+```
 
-- Multi-file upload panel
-- Text extraction for PDFs, PowerPoint slides, Word documents, and text files
-- Cleaning pass to reduce repeated headers, footers, slide numbers, and obvious noise
-- Chunk-first pipeline for long materials
-- Exam-oriented cheat sheet structure
-- User controls for language, target length, focus style, examples, formulas, exam questions, and density
-- Editable preview before export
-- Markdown export by default
-- PDF export with a compact two-column layout
-- DOCX export for further editing
+启动后，终端会显示本地地址，通常是 `http://localhost:8501`。
 
-## Project Structure
+## Python 版本说明
+
+当前这个目录在本机是用 `Python 3.8.2` 运行的，所以我已经把 `Streamlit` 依赖约束调整为与 `Python 3.8` 兼容的版本范围。
+如果你以后切到 `Python 3.9+`，也可以再把 `streamlit` 版本升级到更新的分支。
+
+## 手动搭建 Streamlit
+
+如果你不想用 `make`，也可以手动执行：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## OpenAI 配置
+
+这个项目现在同时支持两种配置方式：
+
+1. 环境变量
+
+```bash
+export OPENAI_API_KEY="your_api_key_here"
+export OPENAI_MODEL="gpt-4.1-mini"
+```
+
+2. Streamlit secrets
+
+先复制示例文件：
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+```
+
+然后把 `.streamlit/secrets.toml` 改成这样：
+
+```toml
+OPENAI_API_KEY = "your_api_key_here"
+OPENAI_MODEL = "gpt-4.1-mini"
+```
+
+如果没有配置 OpenAI Key，应用也能运行，只是会自动切到本地启发式模式，生成质量会弱一些。
+
+## 项目结构
 
 ```text
 app.py
@@ -34,72 +69,45 @@ cheatsheet_ai/
   processing.py
   generator.py
   exporters.py
+.streamlit/
+  config.toml
+  secrets.toml.example
+Makefile
 requirements.txt
 README.md
 ```
 
-## How It Works
+## 功能概览
 
-1. The app extracts text from each uploaded file.
-2. The extraction is cleaned to remove obvious noise and repeated lines.
-3. Long text is chunked into smaller segments.
-4. Each chunk is summarized first.
-5. Chunk summaries are combined into one final cheat sheet.
-6. The user can edit the generated markdown and export it.
+- 支持上传 `PDF`、`PPTX`、`DOCX`、`TXT`
+- 自动抽取和清洗课程资料文本
+- 长文本会先分块再汇总
+- 可按语言、篇幅、重点方向和细节密度生成小抄
+- 支持在网页里直接编辑结果
+- 支持导出 `Markdown`、`PDF`、`DOCX`
 
-## OpenAI vs. Fallback Mode
+## Streamlit 项目内已补充的内容
 
-The app supports two generation modes:
+- `.streamlit/config.toml`
+  让项目具备默认主题、自动保存刷新和更标准的 Streamlit 配置
+- `.streamlit/secrets.toml.example`
+  方便本地和部署时填写密钥
+- `Makefile`
+  提供 `make install`、`make run`、`make check`
+- `.gitignore`
+  忽略 `.venv`、`secrets.toml` 和缓存文件
 
-- `OpenAI mode`: if `OPENAI_API_KEY` is set, the app uses the OpenAI API for chunk summarization and final cheat sheet generation.
-- `Heuristic mode`: if no API key is available, the app still works using a local rule-based prototype. This is useful for demos, but translation and final phrasing are stronger with OpenAI enabled.
+## 校验命令
 
-Optional environment variables:
-
-```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_MODEL="gpt-4.1-mini"
-```
-
-## Run Locally
-
-### 1. Create and activate a virtual environment
+可以用下面的命令做一次基础检查：
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+make check
 ```
 
-### 2. Install dependencies
+## 运行模式
 
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Start the app
-
-```bash
-streamlit run app.py
-```
-
-Then open the local Streamlit URL shown in the terminal.
-
-## Notes About Export
-
-- Markdown export is the most robust option.
-- PDF export uses a compact, print-friendly two-column layout.
-- DOCX export keeps headings, bullets, and tables readable for later editing.
-- Chinese or bilingual PDF export depends on available PDF font support, but the prototype includes a Unicode-friendly fallback.
-
-## Suggested Next Improvements
-
-- Add OCR for scanned PDFs
-- Add image extraction for slide diagrams
-- Add stronger formula detection
-- Add source citations from uploaded files
-- Add per-section regeneration
-- Add richer table rendering in exports
-
-## Prototype Goal
-
-This first version is intentionally simple but functional. It is aimed at students who upload messy course materials and want a fast, dense, exam-oriented cheat sheet rather than a long summary.
+- `OpenAI mode`
+  配置了 `OPENAI_API_KEY` 后，会调用 OpenAI 进行分块总结和最终生成
+- `Heuristic mode`
+  没有配置密钥时，仍然能跑通完整流程，但更适合演示或离线原型

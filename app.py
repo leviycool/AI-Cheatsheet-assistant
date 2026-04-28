@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import asdict
 
@@ -15,7 +14,13 @@ from cheatsheet_ai.extractors import (
     extract_text_from_txt,
 )
 from cheatsheet_ai.exporters import export_to_docx, export_to_markdown, export_to_pdf
-from cheatsheet_ai.generator import GenerationOptions, generate_cheatsheet, is_openai_configured, summarize_chunks
+from cheatsheet_ai.generator import (
+    GenerationOptions,
+    generate_cheatsheet,
+    get_openai_model,
+    is_openai_configured,
+    summarize_chunks,
+)
 from cheatsheet_ai.processing import chunk_text, clean_extracted_text
 
 
@@ -71,9 +76,10 @@ def main() -> None:
         density = st.radio("Detail level", ["More concise", "Balanced", "More detailed"], index=1)
 
         if is_openai_configured():
-            st.success(f"OpenAI mode enabled ({os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')})")
+            st.success(f"OpenAI mode enabled ({get_openai_model()})")
         else:
             st.warning("OpenAI key not found. Running in heuristic prototype mode.")
+            st.caption("Set OPENAI_API_KEY in your shell or .streamlit/secrets.toml to enable OpenAI mode.")
             if output_language != "English":
                 st.caption("Non-English output works best when an OpenAI API key is available.")
 
