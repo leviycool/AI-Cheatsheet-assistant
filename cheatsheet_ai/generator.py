@@ -21,6 +21,17 @@ except Exception:  # pragma: no cover - safe fallback when dependency is absent
 
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 
+CHEATSHEET_SECTION_ORDER = [
+    "Lecture / Class",
+    "Core Topics",
+    "Key Definitions",
+    "Formulas / Measures",
+    "Key Comparisons",
+    "Methods / Procedures",
+    "Examples / Findings",
+    "Exam Traps / Things to Remember",
+]
+
 
 @dataclass
 class GenerationOptions:
@@ -132,32 +143,46 @@ def _summarize_chunk_with_openai(
     chunk_total: int,
 ) -> tuple[str, UsageStats]:
     system_prompt = (
-        "You are an exam-preparation compression assistant. Summarize source material into high-density, "
-        "exam-relevant study notes. Preserve definitions, formulas, distinctions, procedures, traps, and examples. "
-        "Use markdown bullets and headings. Avoid long paragraphs."
+        "You are an expert graduate-level study assistant. Your highest priority is factual accuracy. "
+        "Use only information explicitly supported by the uploaded lecture slides in this chunk. "
+        "Do not invent, generalize, repair missing meaning, or add outside knowledge. "
+        "If a fragment is uncertain, broken, duplicated, decorative, or incomplete OCR, leave it out. "
+        "Return compact extraction notes that preserve the original technical meaning."
     )
     user_prompt = f"""
-Chunk {chunk_index} of {chunk_total}
+Slide chunk {chunk_index} of {chunk_total}
 
 Course/topic: {options.course_name or "Infer from material"}
 Output language: {options.output_language}
-Target length: {options.target_length}
-Focus style: {options.focus_style}
-Include examples: {options.include_examples}
 Include formulas: {options.include_formulas}
 Include possible exam questions: {options.include_exam_questions}
-Density preference: {options.density}
+Include examples/findings: {options.include_examples}
 
-Please summarize this chunk into compact study notes with the sections below when relevant:
+Extract only the useful exam-relevant information that is directly supported by this chunk.
+
+When relevant, capture:
+- Lecture title or class number
+- Agenda items or section titles
 - Key concepts
 - Definitions
-- Formulas / models / frameworks
-- Methods / procedures
-- Comparisons
-- Exam traps / likely testable distinctions
-- Mini examples
+- Formulas or measures
+- Comparisons or distinctions
+- Methods, procedures, algorithms, or code logic
+- Examples, datasets, or empirical findings
+- Exam cautions or interpretation rules
 
-Keep it compact and source-grounded.
+Extraction rules:
+- Do not include generic headings like "Chunk 1 Highlights".
+- Do not include half-sentences or broken OCR.
+- Preserve exact technical terms.
+- Preserve formulas and numerical values exactly when present.
+- Compress wording without changing meaning.
+- Omit anything uncertain.
+
+Output format:
+- Use short markdown bullets only.
+- Do not write paragraphs.
+- Do not add headings unless they are actual slide content.
 
 Source chunk:
 {chunk}
@@ -170,16 +195,16 @@ def _generate_cheatsheet_with_openai(
     chunk_summaries: list[str], options: GenerationOptions
 ) -> tuple[str, UsageStats]:
     system_prompt = (
-        "You are Cheatsheet AI, a high-density exam cheat sheet generator. Produce markdown that is compact, "
-        "structured, and print-friendly. Prioritize likely exam content, formulas, procedures, comparisons, "
-        "and common traps. Prefer bullets, compact tables, and short lines over prose."
+        "You are an expert graduate-level study assistant creating an exam-ready A4 cheatsheet from lecture slides. "
+        "Your highest priority is factual accuracy. Use only information explicitly supported by the extracted slide notes. "
+        "Do not invent, generalize, or add outside knowledge. If support is uncertain, leave it out. "
+        "Every bullet must be complete, non-duplicated, useful for exam review, and faithful to the original meaning."
     )
     word_budget = _target_word_budget(options.target_length, options.density)
     language_hint = _language_instruction(options.output_language)
-    variation_hint = "Use a fresh structure emphasis." if options.variant else "Use the strongest default structure."
 
     user_prompt = f"""
-Create one final cheat sheet in markdown.
+Create one compact, one-page-A4-style cheatsheet in markdown.
 
 Course/topic: {options.course_name or "Infer from the summaries"}
 Output language: {options.output_language}
@@ -190,31 +215,46 @@ Include examples: {options.include_examples}
 Include formulas: {options.include_formulas}
 Include possible exam questions: {options.include_exam_questions}
 Density preference: {options.density}
-Variation note: {variation_hint}
 
-Formatting requirements:
-- Highly condensed but readable
-- Clear section headings
-- Prefer bullets, mini tables, formulas, and short explanations
-- Avoid fluffy prose
-- Make the result suitable for an A4 exam cheat sheet
-- Keep the structure below in this exact order when the content exists
+First infer the lecture structure from the extracted notes:
+1. Lecture title / class number
+2. Agenda or main sections
+3. Key concepts
+4. Definitions
+5. Formulas or models
+6. Comparisons / distinctions
+7. Methods, procedures, or code logic
+8. Important examples, datasets, or empirical findings
+9. Exam-relevant cautions or interpretation rules
 
-Required structure:
-1. Course / Topic Title
-2. Key Concepts
-3. Important Definitions
-4. Core Formulas / Models / Frameworks
-5. Key Comparisons
-6. Step-by-step Methods / Procedures
-7. Common Exam Questions or Traps
-8. Mini Examples if useful
-9. Final Quick Review Checklist
+Accuracy rules:
+- Only include facts directly supported by the extracted notes.
+- Do not include generic headings, OCR debris, or incomplete fragments.
+- Preserve exact technical terms from the slides.
+- Preserve formulas exactly when present.
+- Preserve important numerical values when present.
+- Compress wording without changing meaning.
+- Prefer omitting uncertain fragments over guessing.
+- Do not duplicate information across sections.
 
-Language instruction:
-{language_hint}
+Output rules:
+- Use dense but readable bullets.
+- Avoid paragraphs unless absolutely necessary.
+- Use the exact section headings below, in this order, when supported by the notes.
+- If a section is not clearly supported, omit that section instead of filling it with guesses.
 
-Chunk summaries:
+Exact section headings:
+{chr(10).join(f"[{heading}]" for heading in CHEATSHEET_SECTION_ORDER)}
+
+Special instructions:
+- Under [Lecture / Class], state the lecture title and class number if present.
+- Under [Formulas / Measures], for each item include the name, the formula if available, what it means, and any higher/lower interpretation if explicitly given.
+- Under [Key Comparisons], explain important distinctions only when the distinction is explicitly made in the notes.
+- Under [Examples / Findings], include named cases, datasets, examples, or empirical findings only if explicitly present.
+- Under [Exam Traps / Things to Remember], include interpretation cautions, common mistakes, and likely exam-relevant reminders only if directly supported.
+- {language_hint}
+
+Extracted slide notes:
 {chr(10).join(chunk_summaries)}
 """.strip()
 
@@ -293,23 +333,25 @@ def _heuristic_chunk_summary(chunk: str, options: GenerationOptions, chunk_index
     candidates = _collect_candidates(chunk)
     caps = _section_caps(options)
 
-    lines = [f"## Chunk {chunk_index} Highlights"]
-    lines.extend(_format_bullets("Key concepts", candidates["concepts"], caps["concepts"]))
-    lines.extend(_format_bullets("Definitions", candidates["definitions"], caps["definitions"]))
+    del chunk_index
+    lines: list[str] = []
+    lines.extend(_format_plain_bullets(candidates["headings"], 2))
+    lines.extend(_format_plain_bullets(candidates["concepts"], caps["concepts"]))
+    lines.extend(_format_plain_bullets(candidates["definitions"], caps["definitions"]))
 
     if options.include_formulas:
-        lines.extend(_format_bullets("Formulas", candidates["formulas"], caps["formulas"]))
+        lines.extend(_format_plain_bullets(candidates["formulas"], caps["formulas"]))
 
-    lines.extend(_format_bullets("Methods", candidates["methods"], caps["methods"]))
-    lines.extend(_format_bullets("Comparisons", candidates["comparisons"], caps["comparisons"]))
+    lines.extend(_format_plain_bullets(candidates["methods"], caps["methods"]))
+    lines.extend(_format_plain_bullets(candidates["comparisons"], caps["comparisons"]))
 
     if options.include_exam_questions:
-        lines.extend(_format_bullets("Exam signals", candidates["exam"], caps["exam"]))
+        lines.extend(_format_plain_bullets(candidates["exam"], caps["exam"]))
 
     if options.include_examples:
-        lines.extend(_format_bullets("Examples", candidates["examples"], caps["examples"]))
+        lines.extend(_format_plain_bullets(candidates["examples"], caps["examples"]))
 
-    return "\n".join(lines).strip()
+    return "\n".join(_dedupe_lines(lines)).strip()
 
 
 def _generate_cheatsheet_heuristic(
@@ -321,57 +363,27 @@ def _generate_cheatsheet_heuristic(
     labels = _section_labels(options.output_language)
     caps = _section_caps(options)
     title = _resolve_title(source_text, options)
+    topic_items = candidates["headings"] or candidates["concepts"]
+    exam_items = candidates["exam"]
 
-    sections: list[str] = [f"# {title}", ""]
-    sections.extend(_section_block(labels["concepts"], candidates["concepts"], caps["concepts"], options.output_language))
-    sections.extend(_section_block(labels["definitions"], candidates["definitions"], caps["definitions"], options.output_language))
+    sections: list[str] = []
+    sections.extend(_section_block(labels["lecture"], [title] if title else [], 1))
+    sections.extend(_section_block(labels["topics"], topic_items, caps["concepts"]))
+    sections.extend(_section_block(labels["definitions"], candidates["definitions"], caps["definitions"]))
 
     if options.include_formulas:
-        sections.extend(_section_block(labels["formulas"], candidates["formulas"], caps["formulas"], options.output_language))
+        sections.extend(_section_block(labels["formulas"], candidates["formulas"], caps["formulas"]))
 
-    sections.extend(
-        _section_block(
-            labels["comparisons"],
-            candidates["comparisons"],
-            caps["comparisons"],
-            options.output_language,
-            fallback=_fallback_line("comparisons", options.output_language),
-        )
-    )
-    sections.extend(
-        _section_block(
-            labels["methods"],
-            candidates["methods"],
-            caps["methods"],
-            options.output_language,
-            fallback=_fallback_line("methods", options.output_language),
-        )
-    )
-
-    if options.include_exam_questions:
-        sections.extend(
-            _section_block(
-                labels["exam"],
-                candidates["exam"],
-                caps["exam"],
-                options.output_language,
-                fallback=_fallback_line("exam", options.output_language),
-            )
-        )
+    sections.extend(_section_block(labels["comparisons"], candidates["comparisons"], caps["comparisons"]))
+    sections.extend(_section_block(labels["methods"], candidates["methods"], caps["methods"]))
 
     if options.include_examples:
-        sections.extend(
-            _section_block(
-                labels["examples"],
-                candidates["examples"],
-                caps["examples"],
-                options.output_language,
-                fallback=_fallback_line("examples", options.output_language),
-            )
-        )
+        sections.extend(_section_block(labels["examples"], candidates["examples"], caps["examples"]))
 
     checklist_items = _build_checklist(candidates, options)
-    sections.extend(_section_block(labels["checklist"], checklist_items, caps["checklist"], options.output_language))
+    exam_items = _dedupe_lines(exam_items + checklist_items)
+    if options.include_exam_questions:
+        sections.extend(_section_block(labels["exam"], exam_items, caps["exam"]))
 
     return "\n".join(sections).strip()
 
@@ -452,21 +464,21 @@ def _format_bullets(title: str, items: list[str], limit: int) -> list[str]:
     return lines
 
 
+def _format_plain_bullets(items: list[str], limit: int) -> list[str]:
+    return [f"- {_compact_line(item)}" for item in items[:limit]]
+
+
 def _section_block(
     title: str,
     items: list[str],
     limit: int,
-    language: str,
-    fallback: str | None = None,
 ) -> list[str]:
-    section = [f"## {title}"]
-    selected = [_compact_line(item) for item in items[:limit]]
-
-    if not selected and fallback:
-        selected = [fallback]
+    selected = [_compact_line(item) for item in items[:limit] if _compact_line(item)]
     if not selected:
-        selected = [_fallback_line("generic", language)]
+        return []
 
+    section = [f"[{title}]"]
+    selected = [_compact_line(item) for item in items[:limit]]
     section.extend(f"- {item}" for item in selected)
     section.append("")
     return section
@@ -500,41 +512,41 @@ def _resolve_title(source_text: str, options: GenerationOptions) -> str:
         if 3 <= len(candidate) <= 80 and len(candidate.split()) <= 12:
             return candidate
 
-    return "Exam Cheat Sheet"
+    return "Lecture title not clearly identified"
 
 
 def _section_labels(language: str) -> dict[str, str]:
     if language == "Chinese":
         return {
-            "concepts": "核心概念",
-            "definitions": "重要定义",
-            "formulas": "核心公式 / 模型 / 框架",
+            "lecture": "课程 / 课次",
+            "topics": "核心主题",
+            "definitions": "关键定义",
+            "formulas": "公式 / 指标",
             "comparisons": "关键比较",
-            "methods": "步骤 / 方法",
-            "exam": "常见考试题型 / 易错点",
-            "examples": "小例题 / 示例",
-            "checklist": "考前速查清单",
+            "methods": "方法 / 步骤",
+            "examples": "例子 / 发现",
+            "exam": "考试陷阱 / 记忆点",
         }
     if language == "Bilingual":
         return {
-            "concepts": "核心概念 / Key Concepts",
-            "definitions": "重要定义 / Important Definitions",
-            "formulas": "核心公式 / 模型 / 框架 / Core Formulas / Models / Frameworks",
+            "lecture": "课程 / 课次 / Lecture / Class",
+            "topics": "核心主题 / Core Topics",
+            "definitions": "关键定义 / Key Definitions",
+            "formulas": "公式 / 指标 / Formulas / Measures",
             "comparisons": "关键比较 / Key Comparisons",
-            "methods": "步骤 / 方法 / Step-by-step Methods / Procedures",
-            "exam": "常见考试题型 / 易错点 / Common Exam Questions or Traps",
-            "examples": "小例题 / 示例 / Mini Examples",
-            "checklist": "考前速查清单 / Final Quick Review Checklist",
+            "methods": "方法 / 步骤 / Methods / Procedures",
+            "examples": "例子 / 发现 / Examples / Findings",
+            "exam": "考试陷阱 / 记忆点 / Exam Traps / Things to Remember",
         }
     return {
-        "concepts": "Key Concepts",
-        "definitions": "Important Definitions",
-        "formulas": "Core Formulas / Models / Frameworks",
+        "lecture": "Lecture / Class",
+        "topics": "Core Topics",
+        "definitions": "Key Definitions",
+        "formulas": "Formulas / Measures",
         "comparisons": "Key Comparisons",
-        "methods": "Step-by-step Methods / Procedures",
-        "exam": "Common Exam Questions or Traps",
-        "examples": "Mini Examples",
-        "checklist": "Final Quick Review Checklist",
+        "methods": "Methods / Procedures",
+        "examples": "Examples / Findings",
+        "exam": "Exam Traps / Things to Remember",
     }
 
 
@@ -544,35 +556,6 @@ def _language_instruction(language: str) -> str:
     if language == "Bilingual":
         return "Write a bilingual cheat sheet with compact English and Chinese phrasing."
     return "Write the cheat sheet in English."
-
-
-def _fallback_line(section: str, language: str) -> str:
-    fallback_map = {
-        "English": {
-            "comparisons": "Compare look-alike terms, assumptions, and when each method applies.",
-            "methods": "List the main problem-solving sequence, trigger conditions, and final checks.",
-            "exam": "Flag definitions, boundary cases, and formula-selection mistakes that are easy to test.",
-            "examples": "Add one micro-example that shows how the rule or formula is used.",
-            "generic": "No strong signal was extracted from the source for this section.",
-        },
-        "Chinese": {
-            "comparisons": "比较容易混淆的术语、前提条件，以及各方法的适用场景。",
-            "methods": "列出主要解题步骤、触发条件和最后检查点。",
-            "exam": "标记定义、边界条件和公式选择错误等高频考点。",
-            "examples": "补一个能体现规则或公式用途的微型示例。",
-            "generic": "该部分在原始材料中没有提取到明显信号。",
-        },
-        "Bilingual": {
-            "comparisons": "Compare similar terms and method assumptions / 比较相近术语与方法前提。",
-            "methods": "List the main solving steps and checks / 列出主要步骤与检查点。",
-            "exam": "Flag easy-to-test traps and boundary cases / 标记常考陷阱与边界条件。",
-            "examples": "Add one micro-example / 补一个微型示例。",
-            "generic": "No strong signal extracted / 该部分暂无明显提取信号。",
-        },
-    }
-    return fallback_map.get(language, fallback_map["English"]).get(section, fallback_map["English"]["generic"])
-
-
 def _target_word_budget(target_length: str, density: str) -> str:
     base = {
         "1-page A4": "450-650",
