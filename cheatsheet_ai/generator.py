@@ -35,6 +35,42 @@ class GenerationOptions:
     variant: int = 0
 
 
+@dataclass
+class UsageStats:
+    api_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
+
+    def add(self, other: "UsageStats") -> None:
+        self.api_calls += other.api_calls
+        self.input_tokens += other.input_tokens
+        self.output_tokens += other.output_tokens
+        self.total_tokens += other.total_tokens
+        self.cached_input_tokens += other.cached_input_tokens
+        self.reasoning_tokens += other.reasoning_tokens
+
+    @classmethod
+    def from_response(cls, response) -> "UsageStats":
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return cls(api_calls=1)
+
+        input_details = getattr(usage, "input_tokens_details", None)
+        output_details = getattr(usage, "output_tokens_details", None)
+
+        return cls(
+            api_calls=1,
+            input_tokens=getattr(usage, "input_tokens", 0) or 0,
+            output_tokens=getattr(usage, "output_tokens", 0) or 0,
+            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+            cached_input_tokens=getattr(input_details, "cached_tokens", 0) or 0,
+            reasoning_tokens=getattr(output_details, "reasoning_tokens", 0) or 0,
+        )
+
+
 def is_openai_configured() -> bool:
     """Return True when the OpenAI SDK and API key are both available."""
     return OpenAI is not None and bool(get_openai_api_key())
@@ -50,31 +86,34 @@ def get_openai_model() -> str:
     return _get_runtime_config("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
 
 
-def summarize_chunks(chunks: list[str], options: GenerationOptions) -> list[str]:
+def summarize_chunks(chunks: list[str], options: GenerationOptions) -> tuple[list[str], UsageStats]:
     """Summarize each chunk before the final aggregation step."""
+    usage_totals = UsageStats()
     if not chunks:
-        return []
+        return [], usage_totals
 
     summaries: list[str] = []
 
     for index, chunk in enumerate(chunks, start=1):
         if is_openai_configured():
             try:
-                summaries.append(_summarize_chunk_with_openai(chunk, options, index, len(chunks)))
+                summary, chunk_usage = _summarize_chunk_with_openai(chunk, options, index, len(chunks))
+                summaries.append(summary)
+                usage_totals.add(chunk_usage)
                 continue
             except Exception:
                 pass
 
         summaries.append(_heuristic_chunk_summary(chunk, options, index))
 
-    return summaries
+    return summaries, usage_totals
 
 
 def generate_cheatsheet(
     chunk_summaries: list[str],
     options: GenerationOptions,
     source_text: str | None = None,
-) -> str:
+) -> tuple[str, UsageStats]:
     """Combine chunk summaries into one condensed, exam-oriented cheat sheet."""
     if is_openai_configured():
         try:
@@ -83,7 +122,7 @@ def generate_cheatsheet(
             pass
 
     combined_source = "\n\n".join(chunk_summaries) if chunk_summaries else (source_text or "")
-    return _generate_cheatsheet_heuristic(combined_source, options, source_text or combined_source)
+    return _generate_cheatsheet_heuristic(combined_source, options, source_text or combined_source), UsageStats()
 
 
 def _summarize_chunk_with_openai(
@@ -91,7 +130,7 @@ def _summarize_chunk_with_openai(
     options: GenerationOptions,
     chunk_index: int,
     chunk_total: int,
-) -> str:
+) -> tuple[str, UsageStats]:
     system_prompt = (
         "You are an exam-preparation compression assistant. Summarize source material into high-density, "
         "exam-relevant study notes. Preserve definitions, formulas, distinctions, procedures, traps, and examples. "
@@ -127,7 +166,9 @@ Source chunk:
     return _call_openai(system_prompt, user_prompt, max_output_tokens=1400)
 
 
-def _generate_cheatsheet_with_openai(chunk_summaries: list[str], options: GenerationOptions) -> str:
+def _generate_cheatsheet_with_openai(
+    chunk_summaries: list[str], options: GenerationOptions
+) -> tuple[str, UsageStats]:
     system_prompt = (
         "You are Cheatsheet AI, a high-density exam cheat sheet generator. Produce markdown that is compact, "
         "structured, and print-friendly. Prioritize likely exam content, formulas, procedures, comparisons, "
@@ -180,7 +221,7 @@ Chunk summaries:
     return _call_openai(system_prompt, user_prompt, max_output_tokens=2600)
 
 
-def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -> str:
+def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -> tuple[str, UsageStats]:
     client = OpenAI(api_key=get_openai_api_key())
     response = client.responses.create(
         model=get_openai_model(),
@@ -196,10 +237,11 @@ def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -
             },
         ],
     )
+    usage_stats = UsageStats.from_response(response)
 
     output_text = getattr(response, "output_text", "")
     if output_text:
-        return output_text.strip()
+        return output_text.strip(), usage_stats
 
     parts: list[str] = []
     for item in getattr(response, "output", []):
@@ -208,7 +250,7 @@ def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -
             if text:
                 parts.append(text)
 
-    return "\n".join(parts).strip()
+    return "\n".join(parts).strip(), usage_stats
 
 
 def _get_runtime_config(name: str) -> str:

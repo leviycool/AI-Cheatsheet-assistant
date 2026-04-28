@@ -16,6 +16,7 @@ from cheatsheet_ai.extractors import (
 from cheatsheet_ai.exporters import export_to_docx, export_to_markdown, export_to_pdf
 from cheatsheet_ai.generator import (
     GenerationOptions,
+    UsageStats,
     generate_cheatsheet,
     get_openai_model,
     is_openai_configured,
@@ -191,8 +192,11 @@ def _generate_from_existing_text(options: GenerationOptions) -> None:
 def _run_generation_pipeline(options: GenerationOptions) -> None:
     cleaned_text = st.session_state.get("cleaned_text", "")
     chunks = chunk_text(cleaned_text)
-    summaries = summarize_chunks(chunks, options)
-    cheatsheet_markdown = generate_cheatsheet(summaries, options, source_text=cleaned_text)
+    summaries, summary_usage = summarize_chunks(chunks, options)
+    cheatsheet_markdown, final_usage = generate_cheatsheet(summaries, options, source_text=cleaned_text)
+    total_usage = UsageStats()
+    total_usage.add(summary_usage)
+    total_usage.add(final_usage)
 
     st.session_state["chunk_count"] = len(chunks)
     st.session_state["chunk_summaries"] = summaries
@@ -200,6 +204,12 @@ def _run_generation_pipeline(options: GenerationOptions) -> None:
     st.session_state["editable_cheatsheet"] = cheatsheet_markdown
     st.session_state["last_options"] = asdict(options)
     st.session_state["generation_variant"] = options.variant
+    st.session_state["openai_usage"] = {
+        "model": get_openai_model() if total_usage.api_calls else "",
+        "chunk_summary": asdict(summary_usage),
+        "final_generation": asdict(final_usage),
+        "total": asdict(total_usage),
+    }
 
 
 def _store_extraction_state(extracted_by_file: list[dict[str, str]], combined_text: str) -> None:
@@ -216,6 +226,8 @@ def _render_results() -> None:
     stats_columns[0].metric("Source words", st.session_state.get("source_word_count", 0))
     stats_columns[1].metric("Chunks", st.session_state.get("chunk_count", 0))
     stats_columns[2].metric("Mode", "OpenAI" if is_openai_configured() else "Heuristic")
+
+    _render_usage_summary()
 
     tabs = st.tabs(["Edit", "Preview", "Source Preview"])
 
@@ -304,6 +316,39 @@ def _has_cleaned_text() -> bool:
 def _slugify_filename(name: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", name.strip()).strip("-").lower()
     return slug or "cheatsheet-ai-output"
+
+
+def _render_usage_summary() -> None:
+    usage = st.session_state.get("openai_usage", {})
+    total = usage.get("total", {})
+
+    if not total.get("api_calls", 0):
+        return
+
+    st.caption(f"Latest OpenAI usage ({usage.get('model', 'unknown model')})")
+
+    usage_columns = st.columns(4)
+    usage_columns[0].metric("Prompt tokens", _format_number(total.get("input_tokens", 0)))
+    usage_columns[1].metric("Completion tokens", _format_number(total.get("output_tokens", 0)))
+    usage_columns[2].metric("Total tokens", _format_number(total.get("total_tokens", 0)))
+    usage_columns[3].metric("API calls", _format_number(total.get("api_calls", 0)))
+
+    with st.expander("Token usage details"):
+        detail_columns = st.columns(4)
+        detail_columns[0].metric("Cached prompt", _format_number(total.get("cached_input_tokens", 0)))
+        detail_columns[1].metric("Reasoning tokens", _format_number(total.get("reasoning_tokens", 0)))
+        detail_columns[2].metric(
+            "Chunk summary tokens",
+            _format_number(usage.get("chunk_summary", {}).get("total_tokens", 0)),
+        )
+        detail_columns[3].metric(
+            "Final generation tokens",
+            _format_number(usage.get("final_generation", {}).get("total_tokens", 0)),
+        )
+
+
+def _format_number(value: int) -> str:
+    return f"{int(value):,}"
 
 
 if __name__ == "__main__":
