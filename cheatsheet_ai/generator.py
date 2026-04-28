@@ -22,8 +22,10 @@ except Exception:  # pragma: no cover - safe fallback when dependency is absent
     st = None  # type: ignore[assignment]
 
 
-DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
-FALLBACK_OPENAI_MODELS = ("gpt-4.1-mini", "gpt-4o-mini")
+DEFAULT_OPENAI_MODEL = "gpt-5.2"
+FALLBACK_OPENAI_MODELS = ("gpt-5.2-chat-latest",)
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+US_OPENAI_BASE_URL = "https://us.api.openai.com/v1"
 
 CHEATSHEET_SECTION_ORDER = [
     "1. Core Concepts",
@@ -183,6 +185,23 @@ def get_openai_api_key() -> str:
 def get_openai_model() -> str:
     """Read the preferred model from env vars or Streamlit secrets."""
     return _get_runtime_config("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
+
+
+def get_openai_base_url() -> str:
+    """Read the preferred OpenAI base URL from env vars or Streamlit secrets."""
+    direct = (
+        _get_runtime_config("OPENAI_BASE_URL")
+        or _get_runtime_config("OPENAI_API_BASE")
+        or _get_runtime_config("OPENAI_API_BASE_URL")
+    )
+    if direct:
+        return _normalize_base_url(direct)
+
+    nested = _read_streamlit_secret("openai", "base_url")
+    if nested:
+        return _normalize_base_url(nested)
+
+    return ""
 
 
 def extract_concepts(
@@ -804,64 +823,82 @@ def _call_openai(
     text_format: dict[str, Any] | None = None,
     tool_choice: str | None = None,
 ) -> LLMCallResult:
-    client = OpenAI(api_key=get_openai_api_key())
     last_error: Exception | None = None
-
-    for model_name in _candidate_model_names():
-        try:
-            response = _call_responses_api(
-                client=client,
-                model_name=model_name,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                max_output_tokens=max_output_tokens,
-                tools=tools,
-                include=include,
-                text_format=text_format,
-                tool_choice=tool_choice,
-            )
-            return _build_llm_call_result(response, model_name, text_format, step_name)
-        except Exception as exc:
-            last_error = exc
-            _record_pipeline_error(
-                step_name,
-                exc,
-                {
-                    "api_mode": "responses",
-                    "model": model_name,
-                    "max_output_tokens": max_output_tokens,
-                    "tools": tools or [],
-                    "include": include or [],
-                    "text_format": text_format or {},
-                    "tool_choice": tool_choice or "",
-                },
-            )
-
-        if tools:
+    base_url_candidates = _candidate_base_urls()
+    tried_base_urls: set[str] = set()
+    index = 0
+    while index < len(base_url_candidates):
+        base_url = base_url_candidates[index]
+        index += 1
+        base_url_key = base_url or DEFAULT_OPENAI_BASE_URL
+        if base_url_key in tried_base_urls:
             continue
+        tried_base_urls.add(base_url_key)
+        client = _build_openai_client(base_url)
 
-        try:
-            response = _call_chat_completions_api(
-                client=client,
-                model_name=model_name,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                max_output_tokens=max_output_tokens,
-                text_format=text_format,
-            )
-            return _build_llm_call_result(response, model_name, text_format, step_name)
-        except Exception as exc:
-            last_error = exc
-            _record_pipeline_error(
-                step_name,
-                exc,
-                {
-                    "api_mode": "chat_completions",
-                    "model": model_name,
-                    "max_output_tokens": max_output_tokens,
-                    "text_format": text_format or {},
-                },
-            )
+        for model_name in _candidate_model_names():
+            try:
+                response = _call_responses_api(
+                    client=client,
+                    model_name=model_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_output_tokens=max_output_tokens,
+                    tools=tools,
+                    include=include,
+                    text_format=text_format,
+                    tool_choice=tool_choice,
+                )
+                return _build_llm_call_result(response, model_name, base_url_key, text_format, step_name)
+            except Exception as exc:
+                last_error = exc
+                _record_pipeline_error(
+                    step_name,
+                    exc,
+                    {
+                        "api_mode": "responses",
+                        "base_url": base_url_key,
+                        "model": model_name,
+                        "max_output_tokens": max_output_tokens,
+                        "tools": tools or [],
+                        "include": include or [],
+                        "text_format": text_format or {},
+                        "tool_choice": tool_choice or "",
+                    },
+                )
+                suggested_base_url = _extract_suggested_base_url(exc)
+                if suggested_base_url and suggested_base_url not in tried_base_urls and suggested_base_url not in base_url_candidates:
+                    base_url_candidates.append(suggested_base_url)
+
+            if tools:
+                continue
+
+            try:
+                response = _call_chat_completions_api(
+                    client=client,
+                    model_name=model_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_output_tokens=max_output_tokens,
+                    text_format=text_format,
+                )
+                return _build_llm_call_result(response, model_name, base_url_key, text_format, step_name)
+            except Exception as exc:
+                last_error = exc
+                _record_pipeline_error(
+                    step_name,
+                    exc,
+                    {
+                        "api_mode": "chat_completions",
+                        "base_url": base_url_key,
+                        "model": model_name,
+                        "max_output_tokens": max_output_tokens,
+                        "text_format": text_format or {},
+                    },
+                )
+                suggested_base_url = _extract_suggested_base_url(exc)
+                if suggested_base_url and suggested_base_url not in tried_base_urls and suggested_base_url not in base_url_candidates:
+                    base_url_candidates.append(suggested_base_url)
 
     raise last_error or RuntimeError("OpenAI call failed without an exception.")
 
@@ -923,9 +960,17 @@ def _call_chat_completions_api(
     return client.chat.completions.create(**request_kwargs)
 
 
+def _build_openai_client(base_url: str | None) -> Any:
+    kwargs: dict[str, Any] = {"api_key": get_openai_api_key()}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAI(**kwargs)
+
+
 def _build_llm_call_result(
     response: Any,
     model_name: str,
+    base_url: str,
     text_format: dict[str, Any] | None,
     step_name: str,
 ) -> LLMCallResult:
@@ -948,6 +993,7 @@ def _build_llm_call_result(
         usage_keys=usage_keys,
         response_type=type(response).__name__,
     )
+    _remember_working_openai_route(model_name, base_url)
     _record_token_usage(step_name, result)
     return result
 
@@ -1023,16 +1069,89 @@ def _get_runtime_config(name: str) -> str:
     return ""
 
 
+def _candidate_base_urls() -> list[str | None]:
+    configured = get_openai_base_url()
+    remembered = _get_remembered_openai_base_url()
+    candidates: list[str | None] = []
+    seen: set[str] = set()
+
+    for value in (remembered, configured, DEFAULT_OPENAI_BASE_URL, US_OPENAI_BASE_URL):
+        normalized = _normalize_base_url(value) if value else DEFAULT_OPENAI_BASE_URL
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append(normalized)
+
+    return candidates
+
+
 def _candidate_model_names() -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
-    for model_name in (get_openai_model(), DEFAULT_OPENAI_MODEL, *FALLBACK_OPENAI_MODELS):
+    remembered_model = _get_remembered_openai_model()
+    for model_name in (remembered_model, get_openai_model(), DEFAULT_OPENAI_MODEL, *FALLBACK_OPENAI_MODELS):
         name = str(model_name or "").strip()
         if not name or name in seen:
             continue
         seen.add(name)
         ordered.append(name)
     return ordered
+
+
+def _normalize_base_url(value: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    if not normalized.startswith(("http://", "https://")):
+        normalized = f"https://{normalized}"
+    normalized = normalized.rstrip("/")
+    if not normalized.endswith("/v1"):
+        normalized = f"{normalized}/v1"
+    return normalized
+
+
+def _extract_suggested_base_url(exc: Exception) -> str:
+    message = str(exc)
+    match = re.search(r"Please make your request to\s+([A-Za-z0-9.-]+)", message)
+    if not match:
+        return ""
+    return _normalize_base_url(match.group(1))
+
+
+def _remember_working_openai_route(model_name: str, base_url: str) -> None:
+    if st is None:
+        return
+    try:
+        st.session_state["openai_runtime_route"] = {
+            "model": model_name,
+            "base_url": base_url,
+        }
+    except Exception:
+        return
+
+
+def _get_remembered_openai_base_url() -> str:
+    if st is None:
+        return ""
+    try:
+        route = st.session_state.get("openai_runtime_route", {})
+    except Exception:
+        return ""
+    if not isinstance(route, dict):
+        return ""
+    return _normalize_base_url(str(route.get("base_url", "")).strip())
+
+
+def _get_remembered_openai_model() -> str:
+    if st is None:
+        return ""
+    try:
+        route = st.session_state.get("openai_runtime_route", {})
+    except Exception:
+        return ""
+    if not isinstance(route, dict):
+        return ""
+    return str(route.get("model", "")).strip()
 
 
 def _read_response_field(obj: Any, name: str):

@@ -157,6 +157,8 @@ def _heading_level_from_style(style_name: str) -> int:
 def _normalize_extracted_line(line: str) -> str:
     line = line.replace("\xa0", " ")
     line = line.replace("\u2022", "-")
+    line = line.replace("\u25cf", "-")
+    line = line.replace("\u25e6", "-")
     line = re.sub(r"\s+", " ", line).strip()
     return line
 

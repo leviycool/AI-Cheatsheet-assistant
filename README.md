@@ -40,7 +40,7 @@ streamlit run app.py
 
 ```bash
 export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_MODEL="gpt-4.1-mini"
+export OPENAI_MODEL="gpt-5.2"
 ```
 
 2. Streamlit secrets
@@ -55,7 +55,9 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 
 ```toml
 OPENAI_API_KEY = "your_api_key_here"
-OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_MODEL = "gpt-5.2"
+# Optional for regional OpenAI projects:
+# OPENAI_BASE_URL = "https://us.api.openai.com/v1"
 ```
 
 如果没有配置 OpenAI Key，应用也能运行，只是会自动切到本地启发式模式，生成质量会弱一些。
@@ -66,7 +68,9 @@ OPENAI_MODEL = "gpt-4.1-mini"
 
 ```toml
 OPENAI_API_KEY = "sk-你的真实key"
-OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_MODEL = "gpt-5.2"
+# Optional for regional OpenAI projects:
+# OPENAI_BASE_URL = "https://us.api.openai.com/v1"
 ```
 
 也支持这种分组写法：
@@ -74,8 +78,12 @@ OPENAI_MODEL = "gpt-4.1-mini"
 ```toml
 [openai]
 api_key = "sk-你的真实key"
-model = "gpt-4.1-mini"
+model = "gpt-5.2"
+# Optional for regional OpenAI projects:
+# base_url = "https://us.api.openai.com/v1"
 ```
+
+如果你的 OpenAI 项目提示 `incorrect regional hostname`，就把 `OPENAI_BASE_URL` 设成报错里提示的主机地址；例如美国区域通常是 `https://us.api.openai.com/v1`。
 
 这两种格式项目都已经支持，而且 `secrets` 不会进入 Git 仓库。
 

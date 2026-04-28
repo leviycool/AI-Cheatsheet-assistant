@@ -213,6 +213,15 @@ def _run_generation_pipeline(options: GenerationOptions) -> None:
     token_usage = st.session_state.get("token_usage", _empty_token_usage_state(configured_model))
     model_name = str(token_usage.get("model") or configured_model)
     debug_info = token_usage.get("debug", _empty_token_usage_state().get("debug", {}))
+    visible_error_count = _count_pipeline_errors(
+        st.session_state.get("pipeline_errors", {}),
+        bool(total_usage.api_calls),
+    )
+
+    if is_openai_configured() and total_usage.api_calls == 0 and visible_error_count:
+        cheatsheet_markdown = _generation_failed_markdown(
+            _first_pipeline_error_message(st.session_state.get("pipeline_errors", {}), False)
+        )
 
     st.session_state["chunk_count"] = len(chunks)
     st.session_state["concept_inventory"] = concept_inventory
@@ -326,9 +335,16 @@ def display_result() -> None:
     stats_columns[1].metric("Chunks", st.session_state.get("chunk_count", 0))
     stats_columns[2].metric("Mode", "OpenAI" if is_openai_configured() else "Heuristic")
 
-    pipeline_error_count = _count_pipeline_errors(st.session_state.get("pipeline_errors", {}))
+    token_usage = st.session_state.get("token_usage", {})
+    pipeline_error_count = _count_pipeline_errors(
+        st.session_state.get("pipeline_errors", {}),
+        bool(token_usage.get("total", {}).get("api_calls", 0)),
+    )
     if pipeline_error_count:
-        first_error = _first_pipeline_error_message(st.session_state.get("pipeline_errors", {}))
+        first_error = _first_pipeline_error_message(
+            st.session_state.get("pipeline_errors", {}),
+            bool(token_usage.get("total", {}).get("api_calls", 0)),
+        )
         st.warning(
             f"{pipeline_error_count} OpenAI step(s) failed during this run. "
             "The app used fallbacks where possible. Expand `Token Usage` and enable debug info to inspect the errors."
@@ -427,7 +443,7 @@ def parse_slides(uploaded_files) -> tuple[list[dict[str, str]], str]:
         try:
             raw_bytes = uploaded_file.getvalue()
             extracted_text = _extract_text(uploaded_file.name, raw_bytes)
-            cleaned_text = clean_extracted_text(extracted_text)
+            cleaned_text = _focus_slide_text(clean_extracted_text(extracted_text))
         except Exception as exc:
             st.warning(f"Skipping {uploaded_file.name}: {exc}")
             continue
@@ -443,6 +459,60 @@ def parse_slides(uploaded_files) -> tuple[list[dict[str, str]], str]:
 
     combined_text = clean_extracted_text("\n\n".join(cleaned_sections)) if cleaned_sections else ""
     return extracted_by_file, combined_text
+
+
+def _focus_slide_text(cleaned_text: str) -> str:
+    if not cleaned_text.strip():
+        return cleaned_text
+
+    lines = cleaned_text.splitlines()
+    agenda_index = -1
+    for index, line in enumerate(lines):
+        stripped = line.strip().lower()
+        if stripped in {"agenda", "## agenda", "# agenda"}:
+            agenda_index = index
+            break
+
+    if agenda_index <= 0:
+        return cleaned_text
+
+    preamble = "\n".join(lines[:agenda_index])
+    question_like_preamble = preamble.count("?") >= 3 or sum(
+        line.strip().lower().startswith(("does ", "is ", "are ", "can ", "would ", "if "))
+        for line in lines[:agenda_index]
+    ) >= 5
+    if not question_like_preamble:
+        return cleaned_text
+
+    title_block: list[str] = []
+    for line in lines[:agenda_index]:
+        stripped = line.strip()
+        if not stripped:
+            if title_block:
+                break
+            continue
+        title_block.append(line)
+        if len(title_block) >= 4:
+            break
+
+    focused_lines: list[str] = []
+    if title_block:
+        focused_lines.extend(title_block)
+        focused_lines.append("")
+    focused_lines.extend(lines[agenda_index:])
+    return "\n".join(focused_lines).strip()
+
+
+def _generation_failed_markdown(first_error: str) -> str:
+    lines = [
+        "# Generation failed",
+        "",
+        "The app did not generate a cheatsheet because every OpenAI request failed.",
+        "Open `Token Usage` and `Show raw usage debug info` to inspect the API error.",
+    ]
+    if first_error:
+        lines.extend(["", f"First error: {first_error}"])
+    return "\n".join(lines)
 
 
 def _concept_inventory_from_summaries(summaries: list[str]) -> list[dict[str, object]]:
@@ -499,7 +569,7 @@ def _render_token_usage() -> None:
     usage = st.session_state.get("token_usage", {})
     total = usage.get("total", {})
     pipeline_errors = st.session_state.get("pipeline_errors", {})
-    pipeline_error_count = _count_pipeline_errors(pipeline_errors)
+    pipeline_error_count = _count_pipeline_errors(pipeline_errors, bool(total.get("api_calls", 0)))
 
     if not usage:
         return
@@ -508,7 +578,7 @@ def _render_token_usage() -> None:
 
     with st.expander("Token Usage", expanded=True):
         show_debug = st.checkbox("Show raw usage debug info", key="show_raw_usage_debug")
-        first_error = _first_pipeline_error_message(pipeline_errors)
+        first_error = _first_pipeline_error_message(pipeline_errors, bool(total.get("api_calls", 0)))
 
         if not total.get("api_calls", 0):
             if pipeline_error_count:
@@ -722,19 +792,22 @@ def _get_pricing_for_model(model_name: str) -> dict[str, float] | None:
     return None
 
 
-def _count_pipeline_errors(errors: object) -> int:
+def _count_pipeline_errors(errors: object, has_successful_api_calls: bool = False) -> int:
     if not isinstance(errors, dict):
         return 0
-    return sum(len(value) for value in errors.values() if isinstance(value, list))
+    return sum(len(_visible_error_entries(value, has_successful_api_calls)) for value in errors.values() if isinstance(value, list))
 
 
-def _first_pipeline_error_message(errors: object) -> str:
+def _first_pipeline_error_message(errors: object, has_successful_api_calls: bool = False) -> str:
     if not isinstance(errors, dict):
         return ""
     for value in errors.values():
-        if not isinstance(value, list) or not value:
+        if not isinstance(value, list):
             continue
-        first = value[0]
+        visible = _visible_error_entries(value, has_successful_api_calls)
+        if not visible:
+            continue
+        first = visible[0]
         if not isinstance(first, dict):
             continue
         error_type = str(first.get("error_type", "")).strip()
@@ -743,6 +816,18 @@ def _first_pipeline_error_message(errors: object) -> str:
         if parts:
             return ": ".join(parts)
     return ""
+
+
+def _visible_error_entries(entries: list[object], has_successful_api_calls: bool) -> list[dict[str, object]]:
+    visible: list[dict[str, object]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        message = str(entry.get("message", "")).lower()
+        if has_successful_api_calls and "incorrect regional hostname" in message:
+            continue
+        visible.append(entry)
+    return visible
 
 
 if __name__ == "__main__":

@@ -38,6 +38,11 @@ def clean_extracted_text(text: str) -> str:
         if plain == previous_plain:
             continue
 
+        if cleaned and cleaned[-1] != "" and _should_join_lines(cleaned[-1], raw_line):
+            cleaned[-1] = _repair_spacing(f"{cleaned[-1]} {raw_line}")
+            previous_plain = _plain_line(cleaned[-1])
+            continue
+
         cleaned.append(_repair_spacing(raw_line))
         previous_plain = plain
 
@@ -157,6 +162,31 @@ def _looks_contentful(line: str) -> bool:
 def _repair_spacing(line: str) -> str:
     line = re.sub(r"\s+([,:;])", r"\1", line)
     return line
+
+
+def _should_join_lines(previous_line: str, current_line: str) -> bool:
+    previous = previous_line.strip()
+    current = current_line.strip()
+    if not previous or not current:
+        return False
+
+    if previous.startswith(("#", "-", "*", "|")) and current.startswith(("#", "-", "*", "|")):
+        return False
+    if current.startswith(("#", "-", "*", "|", ">", ".")):
+        return False
+    if re.match(r"^\d+\.\s+", current):
+        return False
+    if previous.endswith((".", "?", "!", ":", ";")):
+        return False
+    if re.search(r"[=<>|]", previous) or re.search(r"[=<>|]", current):
+        return False
+    if previous.lower().startswith(("input dataset", "output dataset", "summary statistics", "variable |")):
+        return False
+    if re.match(r"^[a-z(\[]", current):
+        return True
+    if previous.endswith((",", "--")):
+        return True
+    return False
 
 
 def _split_large_paragraph(paragraph: str, max_chars: int) -> list[str]:
