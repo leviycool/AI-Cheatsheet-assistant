@@ -17,11 +17,13 @@ from cheatsheet_ai.exporters import export_to_docx, export_to_markdown, export_t
 from cheatsheet_ai.generator import (
     GenerationOptions,
     UsageStats,
-    audit_cheatsheet,
-    generate_cheatsheet,
+    audit_cheatsheet_from_concepts,
+    clarify_concepts,
+    clean_concepts,
+    extract_concepts,
+    generate_cheatsheet_from_concepts,
     get_openai_model,
     is_openai_configured,
-    summarize_chunks,
 )
 from cheatsheet_ai.processing import chunk_text, clean_extracted_text
 
@@ -88,6 +90,11 @@ def main() -> None:
         include_examples = st.checkbox("Include examples", value=True)
         include_formulas = st.checkbox("Include formulas", value=True)
         include_exam_questions = st.checkbox("Include possible exam questions", value=True)
+        use_web_search = st.checkbox(
+            "Use web search to clarify concepts",
+            value=False,
+            help="Uses the web only to clarify concepts that already appear in the uploaded slides.",
+        )
         density = st.radio("Detail level", ["More concise", "Balanced", "More detailed"], index=1)
 
         if is_openai_configured():
@@ -97,6 +104,8 @@ def main() -> None:
             st.caption("Set OPENAI_API_KEY in your shell or .streamlit/secrets.toml to enable OpenAI mode.")
             if output_language != "English":
                 st.caption("Non-English output works best when an OpenAI API key is available.")
+            if use_web_search:
+                st.caption("Web clarification requires OpenAI mode and will be skipped in heuristic mode.")
 
     uploaded_files = st.file_uploader(
         "Upload lecture slides, notes, PDFs, or documents",
@@ -128,6 +137,7 @@ def main() -> None:
         include_formulas=include_formulas,
         include_exam_questions=include_exam_questions,
         density=density,
+        use_web_search=use_web_search,
         variant=st.session_state.get("generation_variant", 0),
     )
 
@@ -163,37 +173,15 @@ def main() -> None:
         st.error("Generate a cheat sheet first so there is source text to convert.")
 
     if "generated_markdown" in st.session_state:
-        _render_results()
+        display_result()
 
 
 def _process_uploads_and_generate(uploaded_files, options: GenerationOptions) -> None:
     with st.spinner("Extracting text, cleaning materials, and generating the cheat sheet..."):
-        extracted_by_file: list[dict[str, str]] = []
-        cleaned_sections: list[str] = []
-
-        for uploaded_file in uploaded_files:
-            try:
-                raw_bytes = uploaded_file.getvalue()
-                extracted_text = _extract_text(uploaded_file.name, raw_bytes)
-                cleaned_text = clean_extracted_text(extracted_text)
-            except Exception as exc:
-                st.warning(f"Skipping {uploaded_file.name}: {exc}")
-                continue
-
-            extracted_by_file.append(
-                {
-                    "name": uploaded_file.name,
-                    "raw_text": extracted_text,
-                    "cleaned_text": cleaned_text,
-                }
-            )
-            cleaned_sections.append(f"# Source: {uploaded_file.name}\n{cleaned_text}")
-
-        if not cleaned_sections:
+        extracted_by_file, combined_text = parse_slides(uploaded_files)
+        if not extracted_by_file:
             st.error("No uploaded files could be parsed. Please try a different file set.")
             return
-
-        combined_text = clean_extracted_text("\n\n".join(cleaned_sections))
         _store_extraction_state(extracted_by_file, combined_text)
         _run_generation_pipeline(options)
 
@@ -206,30 +194,43 @@ def _generate_from_existing_text(options: GenerationOptions) -> None:
 def _run_generation_pipeline(options: GenerationOptions) -> None:
     cleaned_text = st.session_state.get("cleaned_text", "")
     chunks = chunk_text(cleaned_text)
-    summaries, extraction_usage = summarize_chunks(chunks, options)
-    draft_markdown, generation_usage = generate_cheatsheet(summaries, options, source_text=cleaned_text)
-    cheatsheet_markdown, audit_usage = audit_cheatsheet(draft_markdown, summaries, options)
+    st.session_state["token_usage"] = _empty_token_usage_state(get_openai_model() if is_openai_configured() else "")
+    concept_inventory, extraction_usage = extract_concepts(chunks, options, source_text=cleaned_text)
+    concepts, cleaning_usage = clean_concepts(concept_inventory, options, source_text=cleaned_text)
+    concepts, web_usage = clarify_concepts(concepts, options)
+    draft_markdown, generation_usage = generate_cheatsheet_from_concepts(concepts, options, source_text=cleaned_text)
+    cheatsheet_markdown, audit_usage = audit_cheatsheet_from_concepts(draft_markdown, concepts, options)
     total_usage = UsageStats()
     total_usage.add(extraction_usage)
+    total_usage.add(cleaning_usage)
+    total_usage.add(web_usage)
     total_usage.add(generation_usage)
     total_usage.add(audit_usage)
     model_name = get_openai_model() if total_usage.api_calls else ""
+    token_usage = st.session_state.get("token_usage", _empty_token_usage_state(model_name))
+    debug_info = token_usage.get("debug", _empty_token_usage_state().get("debug", {}))
 
     st.session_state["chunk_count"] = len(chunks)
-    st.session_state["chunk_summaries"] = summaries
+    st.session_state["concept_inventory"] = concept_inventory
+    st.session_state["chunk_summaries"] = [concept.get("concept", "") for concept in concepts]
+    st.session_state["concept_records"] = concepts
     st.session_state["generated_markdown"] = cheatsheet_markdown
     st.session_state["editable_cheatsheet"] = cheatsheet_markdown
     st.session_state["last_options"] = asdict(options)
     st.session_state["generation_variant"] = options.variant
+    st.session_state["sources_used"] = _build_sources_used(concepts)
     st.session_state["token_usage"] = {
         "model": model_name,
         "available": total_usage.usage_available_calls > 0,
         "extraction": asdict(extraction_usage),
+        "cleaning": asdict(cleaning_usage),
+        "web_clarification": asdict(web_usage),
         "generation": asdict(generation_usage),
         "audit": asdict(audit_usage),
         "total": asdict(total_usage),
         "estimated_cost_usd": _estimate_cost_usd(model_name, total_usage),
         "pricing_configured": _get_pricing_for_model(model_name) is not None,
+        "debug": debug_info,
     }
 
 
@@ -239,7 +240,7 @@ def _store_extraction_state(extracted_by_file: list[dict[str, str]], combined_te
     st.session_state["source_word_count"] = len(combined_text.split())
 
 
-def _render_results() -> None:
+def display_result() -> None:
     st.divider()
     st.subheader("Generated Cheat Sheet")
 
@@ -274,6 +275,7 @@ def _render_results() -> None:
                 )
 
     _render_token_usage()
+    _render_sources_used()
 
     st.subheader("Export")
     export_name = _slugify_filename(
@@ -330,6 +332,32 @@ def _extract_text(file_name: str, file_bytes: bytes) -> str:
     raise ValueError(f"Unsupported file type: {extension}")
 
 
+def parse_slides(uploaded_files) -> tuple[list[dict[str, str]], str]:
+    extracted_by_file: list[dict[str, str]] = []
+    cleaned_sections: list[str] = []
+
+    for uploaded_file in uploaded_files:
+        try:
+            raw_bytes = uploaded_file.getvalue()
+            extracted_text = _extract_text(uploaded_file.name, raw_bytes)
+            cleaned_text = clean_extracted_text(extracted_text)
+        except Exception as exc:
+            st.warning(f"Skipping {uploaded_file.name}: {exc}")
+            continue
+
+        extracted_by_file.append(
+            {
+                "name": uploaded_file.name,
+                "raw_text": extracted_text,
+                "cleaned_text": cleaned_text,
+            }
+        )
+        cleaned_sections.append(f"# Source: {uploaded_file.name}\n{cleaned_text}")
+
+    combined_text = clean_extracted_text("\n\n".join(cleaned_sections)) if cleaned_sections else ""
+    return extracted_by_file, combined_text
+
+
 def _has_cleaned_text() -> bool:
     return bool(st.session_state.get("cleaned_text"))
 
@@ -349,12 +377,18 @@ def _render_token_usage() -> None:
     st.subheader("Token Usage")
 
     with st.expander("Token Usage", expanded=True):
+        show_debug = st.checkbox("Show raw usage debug info", key="show_raw_usage_debug")
+
         if not total.get("api_calls", 0):
-            st.info("Token usage not available for this request.")
+            st.info("No API usage was recorded for this run.")
+            if show_debug:
+                st.json(usage.get("debug", {}))
             return
 
         if not usage.get("available", False):
             st.info("Token usage not available for this request.")
+            if show_debug:
+                st.json(usage.get("debug", {}))
             return
 
         top_columns = st.columns(4)
@@ -365,27 +399,131 @@ def _render_token_usage() -> None:
 
         if usage.get("pricing_configured"):
             st.metric("Estimated cost (USD)", _format_cost(usage.get("estimated_cost_usd")))
+            if usage.get("web_clarification", {}).get("api_calls", 0):
+                st.caption("Estimated cost is token-based and may exclude web-search tool-call fees.")
         else:
             st.caption("Estimated cost unavailable because pricing is not configured for this model.")
 
-        detail_columns = st.columns(3)
+        detail_columns = st.columns(4)
         detail_columns[0].metric(
-            "Extraction",
+            "Concept extraction",
             _format_number(usage.get("extraction", {}).get("total_tokens", 0)),
         )
         detail_columns[1].metric(
+            "Concept cleaning",
+            _format_number(usage.get("cleaning", {}).get("total_tokens", 0)),
+        )
+        detail_columns[2].metric(
+            "Web clarification",
+            _format_number(usage.get("web_clarification", {}).get("total_tokens", 0)),
+        )
+        detail_columns[3].metric(
             "Cheatsheet generation",
             _format_number(usage.get("generation", {}).get("total_tokens", 0)),
         )
-        detail_columns[2].metric(
+
+        audit_columns = st.columns(2)
+        audit_columns[0].metric(
             "Audit / revision",
             _format_number(usage.get("audit", {}).get("total_tokens", 0)),
         )
+        audit_columns[1].metric(
+            "API calls",
+            _format_number(total.get("api_calls", 0)),
+        )
 
-        extra_columns = st.columns(3)
-        extra_columns[0].metric("API calls", _format_number(total.get("api_calls", 0)))
-        extra_columns[1].metric("Cached input", _format_number(total.get("cached_input_tokens", 0)))
-        extra_columns[2].metric("Reasoning tokens", _format_number(total.get("reasoning_tokens", 0)))
+        extra_columns = st.columns(2)
+        extra_columns[0].metric("Cached input", _format_number(total.get("cached_input_tokens", 0)))
+        extra_columns[1].metric("Reasoning tokens", _format_number(total.get("reasoning_tokens", 0)))
+
+        if show_debug:
+            st.json(usage.get("debug", {}))
+
+
+def _render_sources_used() -> None:
+    sources = st.session_state.get("sources_used", {})
+    if not sources:
+        return
+
+    with st.expander("Sources Used", expanded=False):
+        st.caption("Lecture slides decide what belongs in the cheatsheet. Web sources are used only to clarify slide concepts.")
+
+        slide_sources = sources.get("slide_sources", [])
+        if slide_sources:
+            st.markdown("**Slides**")
+            for source in slide_sources:
+                st.markdown(f"- {source}")
+
+        web_sources = sources.get("web_sources", [])
+        if web_sources:
+            st.markdown("**Web Clarification Sources**")
+            for source in web_sources:
+                concept = source.get("concept", "Concept")
+                title = source.get("title") or source.get("url") or "Source"
+                url = source.get("url", "")
+                if url:
+                    st.markdown(f"- **{concept}**: [{title}]({url})")
+                else:
+                    st.markdown(f"- **{concept}**: {title}")
+
+        if not slide_sources and not web_sources:
+            st.caption("No sources were recorded for this run.")
+
+
+def _build_sources_used(concepts: list[dict[str, object]]) -> dict[str, list[dict[str, str]] | list[str]]:
+    slide_sources = [entry["name"] for entry in st.session_state.get("extracted_by_file", []) if entry.get("name")]
+    web_sources: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for concept in concepts:
+        concept_name = str(concept.get("concept", "")).strip() or "Concept"
+        for source in concept.get("sources", []) or []:
+            if not isinstance(source, dict):
+                continue
+            title = str(source.get("title", "")).strip()
+            url = str(source.get("url", "")).strip()
+            key = (concept_name.lower(), title.lower(), url.lower())
+            if key in seen or not (title or url):
+                continue
+            seen.add(key)
+            web_sources.append(
+                {
+                    "concept": concept_name,
+                    "title": title,
+                    "url": url,
+                }
+            )
+
+    return {
+        "slide_sources": slide_sources,
+        "web_sources": web_sources,
+    }
+
+
+def _blank_usage_bucket() -> dict[str, int]:
+    return asdict(UsageStats())
+
+
+def _empty_token_usage_state(model_name: str = "") -> dict[str, object]:
+    return {
+        "model": model_name,
+        "available": False,
+        "extraction": _blank_usage_bucket(),
+        "cleaning": _blank_usage_bucket(),
+        "web_clarification": _blank_usage_bucket(),
+        "generation": _blank_usage_bucket(),
+        "audit": _blank_usage_bucket(),
+        "total": _blank_usage_bucket(),
+        "estimated_cost_usd": None,
+        "pricing_configured": False,
+        "debug": {
+            "extraction": [],
+            "cleaning": [],
+            "web_clarification": [],
+            "generation": [],
+            "audit": [],
+        },
+    }
 
 
 def _format_number(value: int) -> str:
