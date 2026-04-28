@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover - safe fallback when dependency is absent
 
 
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
+FALLBACK_OPENAI_MODELS = ("gpt-4.1-mini", "gpt-4o-mini")
 
 CHEATSHEET_SECTION_ORDER = [
     "1. Core Concepts",
@@ -151,6 +152,10 @@ def extract_usage(response: Any) -> dict[str, int | bool]:
 
     input_details = _read_response_field(usage, "input_tokens_details")
     output_details = _read_response_field(usage, "output_tokens_details")
+    if input_details is None:
+        input_details = _read_response_field(usage, "prompt_tokens_details")
+    if output_details is None:
+        output_details = _read_response_field(usage, "completion_tokens_details")
 
     if total_tokens is None and input_tokens is not None and output_tokens is not None:
         total_tokens = input_tokens + output_tokens
@@ -799,8 +804,79 @@ def _call_openai(
     text_format: dict[str, Any] | None = None,
     tool_choice: str | None = None,
 ) -> LLMCallResult:
-    model_name = get_openai_model()
     client = OpenAI(api_key=get_openai_api_key())
+    last_error: Exception | None = None
+
+    for model_name in _candidate_model_names():
+        try:
+            response = _call_responses_api(
+                client=client,
+                model_name=model_name,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_output_tokens=max_output_tokens,
+                tools=tools,
+                include=include,
+                text_format=text_format,
+                tool_choice=tool_choice,
+            )
+            return _build_llm_call_result(response, model_name, text_format, step_name)
+        except Exception as exc:
+            last_error = exc
+            _record_pipeline_error(
+                step_name,
+                exc,
+                {
+                    "api_mode": "responses",
+                    "model": model_name,
+                    "max_output_tokens": max_output_tokens,
+                    "tools": tools or [],
+                    "include": include or [],
+                    "text_format": text_format or {},
+                    "tool_choice": tool_choice or "",
+                },
+            )
+
+        if tools:
+            continue
+
+        try:
+            response = _call_chat_completions_api(
+                client=client,
+                model_name=model_name,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_output_tokens=max_output_tokens,
+                text_format=text_format,
+            )
+            return _build_llm_call_result(response, model_name, text_format, step_name)
+        except Exception as exc:
+            last_error = exc
+            _record_pipeline_error(
+                step_name,
+                exc,
+                {
+                    "api_mode": "chat_completions",
+                    "model": model_name,
+                    "max_output_tokens": max_output_tokens,
+                    "text_format": text_format or {},
+                },
+            )
+
+    raise last_error or RuntimeError("OpenAI call failed without an exception.")
+
+
+def _call_responses_api(
+    client: Any,
+    model_name: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_output_tokens: int,
+    tools: list[dict[str, Any]] | None,
+    include: list[str] | None,
+    text_format: dict[str, Any] | None,
+    tool_choice: str | None,
+) -> Any:
     request_kwargs: dict[str, Any] = {
         "model": model_name,
         "max_output_tokens": max_output_tokens,
@@ -823,22 +899,36 @@ def _call_openai(
         request_kwargs["text"] = {"format": text_format}
     if tool_choice:
         request_kwargs["tool_choice"] = tool_choice
+    return client.responses.create(**request_kwargs)
 
-    request_context = {
+
+def _call_chat_completions_api(
+    client: Any,
+    model_name: str,
+    system_prompt: str,
+    user_prompt: str,
+    max_output_tokens: int,
+    text_format: dict[str, Any] | None,
+) -> Any:
+    request_kwargs: dict[str, Any] = {
         "model": model_name,
-        "max_output_tokens": max_output_tokens,
-        "tools": tools or [],
-        "include": include or [],
-        "text_format": text_format or {},
-        "tool_choice": tool_choice or "",
+        "messages": [
+            {"role": "developer", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_completion_tokens": max_output_tokens,
     }
-    try:
-        response = client.responses.create(
-            **request_kwargs,
-        )
-    except Exception as exc:
-        _record_pipeline_error(step_name, exc, request_context)
-        raise
+    if text_format and text_format.get("type") == "json_object":
+        request_kwargs["response_format"] = {"type": "json_object"}
+    return client.chat.completions.create(**request_kwargs)
+
+
+def _build_llm_call_result(
+    response: Any,
+    model_name: str,
+    text_format: dict[str, Any] | None,
+    step_name: str,
+) -> LLMCallResult:
     usage = extract_usage(response)
     raw_usage = _serialize_debug_object(_read_response_field(response, "usage"))
     response_keys = _extract_response_keys(response)
@@ -933,6 +1023,18 @@ def _get_runtime_config(name: str) -> str:
     return ""
 
 
+def _candidate_model_names() -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for model_name in (get_openai_model(), DEFAULT_OPENAI_MODEL, *FALLBACK_OPENAI_MODELS):
+        name = str(model_name or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        ordered.append(name)
+    return ordered
+
+
 def _read_response_field(obj: Any, name: str):
     if obj is None:
         return None
@@ -1001,6 +1103,24 @@ def _extract_output_text(response: Any) -> str:
     output_text = getattr(response, "output_text", "") or _read_response_field(response, "output_text") or ""
     if output_text:
         return str(output_text)
+
+    choices = _read_response_field(response, "choices") or []
+    if choices:
+        message = _read_response_field(choices[0], "message")
+        content = _read_response_field(message, "content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = _read_response_field(item, "text") or _read_response_field(item, "content")
+                    if text:
+                        parts.append(str(text))
+                elif isinstance(item, str):
+                    parts.append(item)
+            if parts:
+                return "\n".join(parts)
 
     parts: list[str] = []
     for item in _read_response_field(response, "output") or []:
@@ -1328,10 +1448,17 @@ def _extract_concepts_heuristic(source_text: str, options: GenerationOptions) ->
 
     for item in concept_pool:
         cleaned = _compact_line(item, 28)
-        if not cleaned or _looks_like_generic_filler(cleaned) or _looks_incomplete(cleaned):
+        if (
+            not cleaned
+            or _looks_like_generic_filler(cleaned)
+            or _looks_incomplete(cleaned)
+            or _looks_like_nonconcept_noise(cleaned)
+        ):
             continue
 
         concept_name = _infer_concept_name(cleaned)
+        if not concept_name:
+            continue
         category = _infer_concept_category(cleaned)
         record = ConceptRecord(
             concept=concept_name,
@@ -1449,7 +1576,14 @@ def _normalize_concept_records(records: list[dict[str, Any]]) -> list[dict[str, 
         if not isinstance(record, dict):
             continue
         concept = _safe_text(record.get("concept"))
-        if not concept or _looks_like_generic_filler(concept) or _looks_incomplete(concept):
+        slide_context = _safe_text(record.get("slide_context"))
+        if (
+            not concept
+            or _looks_like_generic_filler(concept)
+            or _looks_like_incomplete_concept_name(concept)
+            or _looks_like_nonconcept_noise(concept)
+            or (slide_context and _looks_like_nonconcept_noise(slide_context))
+        ):
             continue
 
         normalized.append(
@@ -1457,7 +1591,7 @@ def _normalize_concept_records(records: list[dict[str, Any]]) -> list[dict[str, 
                 ConceptRecord(
                     concept=concept,
                     category=_normalize_category(_safe_text(record.get("category")) or _safe_text(record.get("kind"))),
-                    slide_context=_safe_text(record.get("slide_context")),
+                    slide_context=slide_context,
                     appears_in_slides=bool(record.get("appears_in_slides", True)),
                     importance=_normalize_importance(_safe_text(record.get("importance"))),
                     needs_web_clarification=bool(record.get("needs_web_clarification")),
@@ -1567,8 +1701,16 @@ def _infer_concept_name(text: str) -> str:
         head = text.split(":", 1)[0].strip()
         if 1 <= len(head.split()) <= 8:
             return head
+    for separator in (" is ", " are ", " refers to ", " means ", " = "):
+        if separator in text.lower():
+            pattern = re.compile(re.escape(separator), re.IGNORECASE)
+            head = pattern.split(text, maxsplit=1)[0].strip()
+            if 1 <= len(head.split()) <= 6 and not _looks_like_nonconcept_noise(head):
+                return head
     words = text.split()
-    return " ".join(words[: min(6, len(words))]).strip()
+    if len(words) <= 6 and not _looks_like_nonconcept_noise(text):
+        return text.strip()
+    return ""
 
 
 def _infer_concept_category(text: str) -> str:
@@ -1696,10 +1838,11 @@ def _collect_candidates(text: str) -> dict[str, list[str]]:
         plain = _strip_markdown(line)
         if not plain or plain.lower().startswith("source:"):
             continue
+        if _looks_like_nonconcept_noise(plain):
+            continue
 
         if line.startswith("#"):
             categories["headings"].append(plain)
-            categories["concepts"].append(plain)
             continue
 
         if _looks_like_formula(plain):
@@ -1716,8 +1859,6 @@ def _collect_candidates(text: str) -> dict[str, list[str]]:
             categories["examples"].append(plain)
 
         if line.startswith(("- ", "* ")) or re.match(r"^\d+\.\s+", line):
-            categories["concepts"].append(plain)
-        elif len(plain.split()) <= 16 and not plain.endswith(":"):
             categories["concepts"].append(plain)
 
     for key, items in list(categories.items()):
@@ -1774,7 +1915,7 @@ def _section_block(
         compacted
         for item in items[:limit]
         for compacted in [_compact_line(item)]
-        if compacted and not _looks_like_generic_filler(compacted)
+        if compacted and not _looks_like_generic_filler(compacted) and not _looks_like_nonconcept_noise(compacted)
     ]
     if not selected:
         return []
@@ -1911,6 +2052,8 @@ def _looks_like_definition(text: str) -> bool:
         return True
     if ":" in text and len(text.split(":")[0].split()) <= 7:
         return True
+    if re.match(r"^[A-Za-z][A-Za-z0-9\s-]{0,50}\s+(is|are)\s+", text) and len(text.split()[:6]) >= 2:
+        return True
     return any(keyword in lowered for keyword in ("defined as", "refers to", "means", "is the"))
 
 
@@ -1984,6 +2127,50 @@ def _looks_incomplete(text: str) -> bool:
     return False
 
 
+def _looks_like_incomplete_concept_name(text: str) -> bool:
+    if not text.strip():
+        return True
+    if text.endswith((":","/","-","(","[","{")):
+        return True
+    if text.count("(") != text.count(")"):
+        return True
+    if text.count("[") != text.count("]"):
+        return True
+    return False
+
+
+def _looks_like_nonconcept_noise(text: str) -> bool:
+    lowered = text.lower().strip()
+    if not lowered:
+        return False
+
+    if "http://" in lowered or "https://" in lowered or "www." in lowered:
+        return True
+    if re.search(r"\(\d{4}\)\s*[:.,]\s*\d", text):
+        return True
+    if re.search(r"\b(?:doi|issn|isbn)\b", lowered):
+        return True
+    if lowered.startswith(("repository", "references", "bibliography")):
+        return True
+    if re.search(r"\b(?:bootstrap|reg|areg|xtreg|logit|probit|summarize|tabulate|egen|gen)\b", lowered) and ":" in lowered:
+        return True
+    if re.search(r"\b(?:prob>=|prob>|chibar2|lr test|likelihood-ratio test|std\.?\s*err\.?|coef\.?)\b", lowered):
+        return True
+
+    tokens = re.findall(r"\b[\w.-]+\b", text)
+    if not tokens:
+        return False
+
+    digit_tokens = sum(any(character.isdigit() for character in token) for token in tokens)
+    numeric_ratio = digit_tokens / len(tokens)
+    if numeric_ratio >= 0.45 and not any(
+        keyword in lowered for keyword in ("density", "degree", "centrality", "formula", "measure", "probability")
+    ):
+        return True
+
+    return False
+
+
 def _group_chunks_for_concept_extraction(chunks: list[str], max_batches: int = 12) -> list[str]:
     if len(chunks) <= max_batches:
         return chunks
@@ -2002,7 +2189,7 @@ def _fallback_concept_candidates(source_text: str, max_items: int = 36) -> list[
         plain = _strip_markdown(raw_line)
         if not plain or plain.lower().startswith("source:"):
             continue
-        if _looks_like_generic_filler(plain) or _looks_incomplete(plain):
+        if _looks_like_generic_filler(plain) or _looks_incomplete(plain) or _looks_like_nonconcept_noise(plain):
             continue
         word_count = len(plain.split())
         if 3 <= word_count <= 28:

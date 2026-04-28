@@ -209,8 +209,9 @@ def _run_generation_pipeline(options: GenerationOptions) -> None:
     total_usage.add(web_usage)
     total_usage.add(generation_usage)
     total_usage.add(audit_usage)
-    model_name = get_openai_model() if is_openai_configured() else ""
-    token_usage = st.session_state.get("token_usage", _empty_token_usage_state(model_name))
+    configured_model = get_openai_model() if is_openai_configured() else ""
+    token_usage = st.session_state.get("token_usage", _empty_token_usage_state(configured_model))
+    model_name = str(token_usage.get("model") or configured_model)
     debug_info = token_usage.get("debug", _empty_token_usage_state().get("debug", {}))
 
     st.session_state["chunk_count"] = len(chunks)
@@ -327,10 +328,13 @@ def display_result() -> None:
 
     pipeline_error_count = _count_pipeline_errors(st.session_state.get("pipeline_errors", {}))
     if pipeline_error_count:
+        first_error = _first_pipeline_error_message(st.session_state.get("pipeline_errors", {}))
         st.warning(
             f"{pipeline_error_count} OpenAI step(s) failed during this run. "
             "The app used fallbacks where possible. Expand `Token Usage` and enable debug info to inspect the errors."
         )
+        if first_error:
+            st.caption(f"First error: {first_error}")
 
     tabs = st.tabs(["Edit", "Preview", "Source Preview"])
 
@@ -504,6 +508,7 @@ def _render_token_usage() -> None:
 
     with st.expander("Token Usage", expanded=True):
         show_debug = st.checkbox("Show raw usage debug info", key="show_raw_usage_debug")
+        first_error = _first_pipeline_error_message(pipeline_errors)
 
         if not total.get("api_calls", 0):
             if pipeline_error_count:
@@ -511,6 +516,8 @@ def _render_token_usage() -> None:
                     f"No API usage was recorded because {pipeline_error_count} OpenAI call(s) failed before "
                     "returning usage metadata. The app fell back to local generation where possible."
                 )
+                if first_error:
+                    st.caption(f"First error: {first_error}")
             else:
                 st.info("No API usage was recorded for this run.")
             if show_debug:
@@ -581,6 +588,8 @@ def _render_token_usage() -> None:
                 f"{pipeline_error_count} pipeline error(s) were recorded. "
                 "Some steps may have fallen back to heuristic generation."
             )
+            if first_error:
+                st.caption(f"First error: {first_error}")
 
         if show_debug:
             if pipeline_errors:
@@ -717,6 +726,23 @@ def _count_pipeline_errors(errors: object) -> int:
     if not isinstance(errors, dict):
         return 0
     return sum(len(value) for value in errors.values() if isinstance(value, list))
+
+
+def _first_pipeline_error_message(errors: object) -> str:
+    if not isinstance(errors, dict):
+        return ""
+    for value in errors.values():
+        if not isinstance(value, list) or not value:
+            continue
+        first = value[0]
+        if not isinstance(first, dict):
+            continue
+        error_type = str(first.get("error_type", "")).strip()
+        message = str(first.get("message", "")).strip()
+        parts = [part for part in (error_type, message) if part]
+        if parts:
+            return ": ".join(parts)
+    return ""
 
 
 if __name__ == "__main__":
