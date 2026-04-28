@@ -136,6 +136,21 @@ def generate_cheatsheet(
     return _generate_cheatsheet_heuristic(combined_source, options, source_text or combined_source), UsageStats()
 
 
+def audit_cheatsheet(
+    cheatsheet_markdown: str,
+    chunk_summaries: list[str],
+    options: GenerationOptions,
+) -> tuple[str, UsageStats]:
+    """Audit and revise the cheatsheet so every bullet is accurate and exam-useful."""
+    if is_openai_configured():
+        try:
+            return _audit_cheatsheet_with_openai(cheatsheet_markdown, chunk_summaries, options)
+        except Exception:
+            pass
+
+    return _audit_cheatsheet_heuristic(cheatsheet_markdown), UsageStats()
+
+
 def _summarize_chunk_with_openai(
     chunk: str,
     options: GenerationOptions,
@@ -293,6 +308,55 @@ def _call_openai(system_prompt: str, user_prompt: str, max_output_tokens: int) -
     return "\n".join(parts).strip(), usage_stats
 
 
+def _audit_cheatsheet_with_openai(
+    cheatsheet_markdown: str,
+    chunk_summaries: list[str],
+    options: GenerationOptions,
+) -> tuple[str, UsageStats]:
+    system_prompt = (
+        "You are an accuracy auditor for graduate-level study cheatsheets. "
+        "Revise the draft so that every bullet is directly supported by the lecture-slide notes, complete, "
+        "non-duplicated, correctly classified, and useful for exam review. "
+        "If a claim is unsupported or uncertain, delete it instead of repairing it with outside knowledge."
+    )
+    language_hint = _language_instruction(options.output_language)
+    user_prompt = f"""
+Audit the draft cheatsheet for accuracy.
+
+Check for:
+1. Unsupported claims
+2. Incomplete sentences
+3. Duplicated points
+4. Generic filler
+5. OCR artifacts
+6. Missing formulas or definitions that are clearly present in the extracted notes
+7. Misclassified content, such as putting examples under formulas
+
+Revise the cheatsheet so that every bullet is accurate, complete, and exam-useful.
+
+Revision rules:
+- Use only information directly supported by the extracted slide notes.
+- Remove unsupported, broken, generic, duplicated, or OCR-corrupted bullets.
+- Move bullets into the correct section when they are misclassified.
+- Add back missing formulas or definitions only when they are clearly present in the extracted notes.
+- Preserve exact technical terms, formulas, and important numerical values.
+- Keep each bullet complete and grammatically understandable.
+- Keep the final result compact enough for one A4 page.
+- Use the same exact section headings when supported:
+{chr(10).join(f"[{heading}]" for heading in CHEATSHEET_SECTION_ORDER)}
+- Omit a section rather than padding it with filler.
+- {language_hint}
+
+Extracted slide notes:
+{chr(10).join(chunk_summaries)}
+
+Draft cheatsheet:
+{cheatsheet_markdown}
+""".strip()
+
+    return _call_openai(system_prompt, user_prompt, max_output_tokens=2200)
+
+
 def _get_runtime_config(name: str) -> str:
     env_value = os.getenv(name, "").strip()
     if env_value:
@@ -388,6 +452,43 @@ def _generate_cheatsheet_heuristic(
     return "\n".join(sections).strip()
 
 
+def _audit_cheatsheet_heuristic(cheatsheet_markdown: str) -> str:
+    audited_lines: list[str] = []
+    seen_bullets: set[str] = set()
+
+    for raw_line in cheatsheet_markdown.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            if audited_lines and audited_lines[-1] != "":
+                audited_lines.append("")
+            continue
+
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if audited_lines and audited_lines[-1] == "":
+                audited_lines.pop()
+            audited_lines.append(stripped)
+            continue
+
+        if not stripped.startswith("- "):
+            continue
+
+        bullet = _compact_line(stripped[2:])
+        if not bullet or _looks_like_generic_filler(bullet) or _looks_incomplete(bullet):
+            continue
+
+        bullet_key = bullet.lower()
+        if bullet_key in seen_bullets:
+            continue
+
+        seen_bullets.add(bullet_key)
+        audited_lines.append(f"- {bullet}")
+
+    while audited_lines and audited_lines[-1] == "":
+        audited_lines.pop()
+
+    return "\n".join(audited_lines)
+
+
 def _collect_candidates(text: str) -> dict[str, list[str]]:
     categories: dict[str, list[str]] = defaultdict(list)
 
@@ -473,12 +574,16 @@ def _section_block(
     items: list[str],
     limit: int,
 ) -> list[str]:
-    selected = [_compact_line(item) for item in items[:limit] if _compact_line(item)]
+    selected = [
+        compacted
+        for item in items[:limit]
+        for compacted in [_compact_line(item)]
+        if compacted and not _looks_like_generic_filler(compacted)
+    ]
     if not selected:
         return []
 
     section = [f"[{title}]"]
-    selected = [_compact_line(item) for item in items[:limit]]
     section.extend(f"- {item}" for item in selected)
     section.append("")
     return section
@@ -556,6 +661,8 @@ def _language_instruction(language: str) -> str:
     if language == "Bilingual":
         return "Write a bilingual cheat sheet with compact English and Chinese phrasing."
     return "Write the cheat sheet in English."
+
+
 def _target_word_budget(target_length: str, density: str) -> str:
     base = {
         "1-page A4": "450-650",
@@ -653,3 +760,27 @@ def _compact_line(text: str, max_words: int = 24) -> str:
         return text.strip()
     shortened = " ".join(words[:max_words])
     return textwrap.shorten(shortened, width=160, placeholder=" ...")
+
+
+def _looks_like_generic_filler(text: str) -> bool:
+    lowered = text.lower()
+    filler_phrases = (
+        "lecture title not clearly identified",
+        "verify you can explain",
+        "the exact distinction in:",
+        "when to use:",
+        "check / 检查",
+    )
+    return any(phrase in lowered for phrase in filler_phrases)
+
+
+def _looks_incomplete(text: str) -> bool:
+    if len(text.split()) < 2:
+        return True
+    if text.endswith((":","/","-","(","[","{")):
+        return True
+    if text.count("(") != text.count(")"):
+        return True
+    if text.count("[") != text.count("]"):
+        return True
+    return False

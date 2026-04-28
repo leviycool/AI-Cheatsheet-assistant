@@ -17,6 +17,7 @@ from cheatsheet_ai.exporters import export_to_docx, export_to_markdown, export_t
 from cheatsheet_ai.generator import (
     GenerationOptions,
     UsageStats,
+    audit_cheatsheet,
     generate_cheatsheet,
     get_openai_model,
     is_openai_configured,
@@ -193,10 +194,12 @@ def _run_generation_pipeline(options: GenerationOptions) -> None:
     cleaned_text = st.session_state.get("cleaned_text", "")
     chunks = chunk_text(cleaned_text)
     summaries, summary_usage = summarize_chunks(chunks, options)
-    cheatsheet_markdown, final_usage = generate_cheatsheet(summaries, options, source_text=cleaned_text)
+    draft_markdown, draft_usage = generate_cheatsheet(summaries, options, source_text=cleaned_text)
+    cheatsheet_markdown, audit_usage = audit_cheatsheet(draft_markdown, summaries, options)
     total_usage = UsageStats()
     total_usage.add(summary_usage)
-    total_usage.add(final_usage)
+    total_usage.add(draft_usage)
+    total_usage.add(audit_usage)
 
     st.session_state["chunk_count"] = len(chunks)
     st.session_state["chunk_summaries"] = summaries
@@ -207,7 +210,8 @@ def _run_generation_pipeline(options: GenerationOptions) -> None:
     st.session_state["openai_usage"] = {
         "model": get_openai_model() if total_usage.api_calls else "",
         "chunk_summary": asdict(summary_usage),
-        "final_generation": asdict(final_usage),
+        "draft_generation": asdict(draft_usage),
+        "accuracy_audit": asdict(audit_usage),
         "total": asdict(total_usage),
     }
 
@@ -338,12 +342,22 @@ def _render_usage_summary() -> None:
         detail_columns[0].metric("Cached prompt", _format_number(total.get("cached_input_tokens", 0)))
         detail_columns[1].metric("Reasoning tokens", _format_number(total.get("reasoning_tokens", 0)))
         detail_columns[2].metric(
+            "Draft generation",
+            _format_number(usage.get("draft_generation", {}).get("total_tokens", 0)),
+        )
+        detail_columns[3].metric(
+            "Accuracy audit",
+            _format_number(usage.get("accuracy_audit", {}).get("total_tokens", 0)),
+        )
+
+        chunk_columns = st.columns(2)
+        chunk_columns[0].metric(
             "Chunk summary tokens",
             _format_number(usage.get("chunk_summary", {}).get("total_tokens", 0)),
         )
-        detail_columns[3].metric(
-            "Final generation tokens",
-            _format_number(usage.get("final_generation", {}).get("total_tokens", 0)),
+        chunk_columns[1].metric(
+            "Audit API calls",
+            _format_number(usage.get("accuracy_audit", {}).get("api_calls", 0)),
         )
 
 
