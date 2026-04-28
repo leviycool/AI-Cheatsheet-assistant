@@ -85,7 +85,6 @@ def main() -> None:
         )
         include_examples = st.checkbox("Include examples", value=True)
         include_formulas = st.checkbox("Include formulas", value=True)
-        include_exam_questions = st.checkbox("Include possible exam questions", value=True)
         use_web_search = st.checkbox(
             "Use web search to clarify concepts",
             value=False,
@@ -131,7 +130,7 @@ def main() -> None:
         focus_style=focus_style,
         include_examples=include_examples,
         include_formulas=include_formulas,
-        include_exam_questions=include_exam_questions,
+        include_exam_questions=False,
         density=density,
         use_web_search=use_web_search,
         variant=st.session_state.get("generation_variant", 0),
@@ -825,6 +824,10 @@ def _visible_error_entries(entries: list[object], has_successful_api_calls: bool
             continue
         message = str(entry.get("message", "")).lower()
         if has_successful_api_calls and "incorrect regional hostname" in message:
+            continue
+        if has_successful_api_calls and (
+            "returned no parseable concepts" in message or "returned no usable concepts" in message
+        ):
             continue
         visible.append(entry)
     return visible

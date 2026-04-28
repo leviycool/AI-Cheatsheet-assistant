@@ -32,7 +32,6 @@ CHEATSHEET_SECTION_ORDER = [
     "2. Key Measures / Formulas",
     "3. Must-Know Distinctions",
     "4. Classic Examples / Findings",
-    "5. Exam Traps",
 ]
 
 
@@ -465,7 +464,7 @@ Course/topic: {options.course_name or "Infer from material"}
 Output language: {options.output_language}
 
 Extract 4 to 10 candidate concepts from this chunk. A concept can be a term, theory, model, measure,
-formula, method, distinction, named study/example, or exam trap.
+formula, method, distinction, or named study/example.
 
 Remove:
 - OCR fragments
@@ -488,7 +487,6 @@ For each concept object include:
 - formula_or_measure
 - distinction
 - example_or_finding
-- exam_trap
 - final_explanation
 
 Rules:
@@ -545,7 +543,7 @@ Rules:
 - Preserve formulas and numerical values when present.
 - Make each record short, complete, conceptual, and exam-useful.
 - Set `appears_in_slides` to true only if the concept clearly appears in the supplied inventory.
-- Use categories only from: definition, measure, formula, theory, method, distinction, example, exam_trap.
+- Use categories only from: definition, measure, formula, theory, method, distinction, example.
 - Set `importance` to high, medium, or low.
 - Use `reason_for_clarification` only when `needs_web_clarification` is true.
 - Write `final_explanation` as the compact explanation you would want the final cheatsheet to use.
@@ -625,7 +623,7 @@ Requirements:
 - Merge repeated ideas.
 - Keep it compact enough for one A4 page.
 - Keep definitions before minor examples.
-- Keep formulas, distinctions, and exam traps when they are high-value.
+- Keep formulas and distinctions when they are high-value.
 - Use the exact section headings below when supported:
 {chr(10).join(f"## {heading}" for heading in CHEATSHEET_SECTION_ORDER)}
 - Under `## 3. Must-Know Distinctions`, prefer a markdown table when possible.
@@ -636,8 +634,7 @@ Requirements:
 Writing style:
 - `Core Concepts`: Concept: definition + why it matters.
 - `Measures / Formulas`: measure/formula + interpretation + high/low meaning if supported.
-- `Examples / Findings`: include only examples that clarify major concepts.
-- `Exam Traps`: write likely wrong idea -> correct idea when supported.
+- `Examples / Findings`: include only examples or findings that clarify major concepts.
 - Delete any concept that does not teach something exam-useful.
 
 Concept records:
@@ -673,7 +670,7 @@ Rules:
 - Use only the concept records.
 - Do not add unrelated concepts.
 - Do not leave generic slide headings, unanswered slide questions, or broken fragments.
-- Prefer definitions, formulas, distinctions, and high-value exam traps over minor detail.
+- Prefer definitions, formulas, distinctions, and useful findings over minor detail.
 - Keep the exact section structure when supported:
 {chr(10).join(f"## {heading}" for heading in CHEATSHEET_SECTION_ORDER)}
 - Keep the title format `# [Course / Lecture Title] - A4 Cheatsheet`.
@@ -706,7 +703,6 @@ Slide chunk {chunk_index} of {chunk_total}
 Course/topic: {options.course_name or "Infer from material"}
 Output language: {options.output_language}
 Include formulas: {options.include_formulas}
-Include possible exam questions: {options.include_exam_questions}
 Include examples/findings: {options.include_examples}
 
 Extract candidate concepts, not candidate sentences.
@@ -717,7 +713,6 @@ A candidate concept can be:
 - model or method
 - important distinction
 - example, finding, or dataset
-- exam trap or interpretation rule
 
 Extraction rules:
 - Do not include slide headings unless they teach a concept.
@@ -730,7 +725,7 @@ Extraction rules:
 Output format:
 - Use short markdown bullets only.
 - One bullet per concept.
-- Each bullet should include as many of these as the chunk supports: concept name, definition, interpretation, distinction, example, or exam trap.
+- Each bullet should include as many of these as the chunk supports: concept name, definition, interpretation, distinction, or example.
 - Do not output random copied fragments.
 
 Source chunk:
@@ -762,7 +757,6 @@ Target length: {options.target_length}
 Approximate word budget: {word_budget}
 Include examples: {options.include_examples}
 Include formulas: {options.include_formulas}
-Include possible exam questions: {options.include_exam_questions}
 Density preference: {options.density}
 
 Core requirement:
@@ -776,7 +770,6 @@ Core requirement:
 For each concept, prefer this teaching format:
 - Concept name: one clear sentence explaining what it means.
 - Why it matters / how to identify it: one short sentence.
-- Exam trap: one short sentence only if useful.
 
 Remove all bullets that are:
 - incomplete sentences
@@ -801,7 +794,6 @@ Output format:
 - Under `## 2. Key Measures / Formulas`, include formula if available and say what high/low values mean when the slides support that interpretation.
 - Under `## 3. Must-Know Distinctions`, prefer a compact markdown table with columns `Concept A | Concept B | Difference`.
 - Under `## 4. Classic Examples / Findings`, include short examples only when they help clarify the concept.
-- Under `## 5. Exam Traps`, write likely multiple-choice logic, common misinterpretations, or cautions only when directly supported.
 - Do not output long paragraphs.
 - Do not output generic section labels or raw extraction fragments.
 - {language_hint}
@@ -1474,9 +1466,6 @@ def _heuristic_chunk_summary(chunk: str, options: GenerationOptions, chunk_index
 
     lines.extend(_format_plain_bullets(candidates["comparisons"], caps["comparisons"]))
 
-    if options.include_exam_questions:
-        lines.extend(_format_plain_bullets(candidates["exam"], caps["exam"]))
-
     if options.include_examples:
         lines.extend(_format_plain_bullets(candidates["examples"], caps["examples"]))
 
@@ -1493,7 +1482,6 @@ def _generate_cheatsheet_heuristic(
     caps = _section_caps(options)
     title = _resolve_display_title(source_text, options)
     core_items = _dedupe_lines(candidates["definitions"] + candidates["concepts"] + candidates["methods"])
-    exam_items = candidates["exam"]
 
     sections: list[str] = [f"# {title} - A4 Cheatsheet", ""]
     sections.extend(_section_block(labels["concepts"], core_items, caps["concepts"]))
@@ -1506,15 +1494,15 @@ def _generate_cheatsheet_heuristic(
     if options.include_examples:
         sections.extend(_section_block(labels["examples"], candidates["examples"], caps["examples"]))
 
-    if options.include_exam_questions:
-        sections.extend(_section_block(labels["exam"], exam_items, caps["exam"]))
-
     return "\n".join(sections).strip()
 
 
 def _audit_cheatsheet_heuristic(cheatsheet_markdown: str) -> str:
     audited_lines: list[str] = []
     seen_bullets: set[str] = set()
+    seen_concepts: set[str] = set()
+    current_section = ""
+    skip_section = False
 
     for raw_line in cheatsheet_markdown.splitlines():
         stripped = raw_line.strip()
@@ -1524,8 +1512,23 @@ def _audit_cheatsheet_heuristic(cheatsheet_markdown: str) -> str:
             continue
 
         if stripped.startswith("#"):
+            current_section = stripped.lower()
+            skip_section = "exam traps" in current_section or "考试陷阱" in current_section
+            if skip_section:
+                continue
             if audited_lines and audited_lines[-1] == "":
                 audited_lines.pop()
+            audited_lines.append(stripped)
+            continue
+
+        if skip_section:
+            continue
+
+        if stripped.startswith("|"):
+            if "must-know distinctions" not in current_section and "必会区分" not in current_section:
+                continue
+            if _looks_like_nonconcept_noise(stripped):
+                continue
             audited_lines.append(stripped)
             continue
 
@@ -1537,10 +1540,13 @@ def _audit_cheatsheet_heuristic(cheatsheet_markdown: str) -> str:
             continue
 
         bullet_key = bullet.lower()
-        if bullet_key in seen_bullets:
+        concept_key = _normalized_text_key(bullet.split(":", 1)[0] if ":" in bullet else bullet)
+        if bullet_key in seen_bullets or (concept_key and concept_key in seen_concepts):
             continue
 
         seen_bullets.add(bullet_key)
+        if concept_key:
+            seen_concepts.add(concept_key)
         audited_lines.append(f"- {bullet}")
 
     while audited_lines and audited_lines[-1] == "":
@@ -1550,6 +1556,10 @@ def _audit_cheatsheet_heuristic(cheatsheet_markdown: str) -> str:
 
 
 def _extract_concepts_heuristic(source_text: str, options: GenerationOptions) -> list[dict[str, Any]]:
+    structured_records = _extract_structured_concepts_from_source(source_text)
+    if structured_records:
+        return _prioritize_concepts(_finalize_concept_records(structured_records), options)
+
     candidates = _collect_candidates(source_text)
     concept_pool = _dedupe_lines(
         candidates["definitions"]
@@ -1558,7 +1568,6 @@ def _extract_concepts_heuristic(source_text: str, options: GenerationOptions) ->
         + candidates["formulas"]
         + candidates["comparisons"]
         + candidates["examples"]
-        + candidates["exam"]
     )
     if not concept_pool:
         concept_pool = _fallback_concept_candidates(source_text)
@@ -1593,7 +1602,6 @@ def _extract_concepts_heuristic(source_text: str, options: GenerationOptions) ->
             formula_or_measure=cleaned if category in {"formula", "measure"} else "",
             distinction=cleaned if category == "distinction" else "",
             example_or_finding=cleaned if category == "example" else "",
-            exam_trap=cleaned if category == "exam_trap" else "",
             final_definition=cleaned,
             kind=category,
         )
@@ -1610,9 +1618,12 @@ def _clean_concepts_heuristic(
 ) -> list[dict[str, Any]]:
     cleaned: list[dict[str, Any]] = []
     for record in _finalize_concept_records(concept_inventory):
+        category = _safe_text(record.get("category")) or _safe_text(record.get("kind"))
+        if _normalize_category(category) == "exam_trap":
+            continue
         importance = _safe_text(record.get("importance")).lower() or _heuristic_importance(
             _safe_text(record.get("slide_context")),
-            _safe_text(record.get("category")) or _safe_text(record.get("kind")),
+            category,
         )
         if importance == "low":
             continue
@@ -1633,7 +1644,8 @@ def _generate_concept_cheatsheet_heuristic(
     formula_lines: list[str] = []
     distinction_rows: list[str] = []
     example_lines: list[str] = []
-    exam_lines: list[str] = []
+    used_concepts: set[str] = set()
+    used_content: set[str] = set()
 
     for concept in concepts:
         name = _safe_text(concept.get("concept"))
@@ -1647,26 +1659,57 @@ def _generate_concept_cheatsheet_heuristic(
         formula = _safe_text(concept.get("formula_or_measure"))
         distinction = _safe_text(concept.get("distinction"))
         example = _safe_text(concept.get("example_or_finding"))
-        trap = _safe_text(concept.get("exam_trap"))
+        concept_key = _normalized_text_key(name)
+        content_key = _normalized_text_key(" ".join(part for part in (definition, formula, distinction, example) if part))
 
-        core_entry = _build_teaching_bullet(name, definition, why, "")
-        if core_entry and category not in {"exam_trap", "example"}:
+        core_entry = _build_teaching_bullet(name, definition, why)
+        if (
+            core_entry
+            and category in {"definition", "theory", "method"}
+            and concept_key not in used_concepts
+            and content_key not in used_content
+        ):
             core_lines.append(core_entry)
+            used_concepts.add(concept_key)
+            if content_key:
+                used_content.add(content_key)
 
-        if formula or category in {"formula", "measure"}:
-            formula_lines.append(_build_measure_bullet(name, formula, definition, trap))
+        if (
+            (formula or category in {"formula", "measure"})
+            and concept_key not in used_concepts
+            and content_key not in used_content
+        ):
+            measure_entry = _build_measure_bullet(name, formula, definition)
+            if measure_entry:
+                formula_lines.append(measure_entry)
+                used_concepts.add(concept_key)
+                if content_key:
+                    used_content.add(content_key)
 
-        if distinction or category == "distinction":
+        if (
+            (distinction or category == "distinction")
+            and concept_key not in used_concepts
+            and content_key not in used_content
+        ):
             left, right, diff = _distinction_row_from_text(name, distinction)
             distinction_rows.append(f"| {left} | {right} | {diff} |")
+            used_concepts.add(concept_key)
+            if content_key:
+                used_content.add(content_key)
 
-        if example or category == "example":
-            example_lines.append(_build_supporting_bullet(name, example))
+        if (
+            (example or category == "example")
+            and concept_key not in used_concepts
+            and content_key not in used_content
+        ):
+            example_entry = _build_supporting_bullet(name, example)
+            if example_entry:
+                example_lines.append(example_entry)
+                used_concepts.add(concept_key)
+                if content_key:
+                    used_content.add(content_key)
 
-        if trap or category == "exam_trap":
-            exam_lines.append(_build_supporting_bullet(name, trap))
-
-    if not any((core_lines, formula_lines, distinction_rows, example_lines, exam_lines)):
+    if not any((core_lines, formula_lines, distinction_rows, example_lines)):
         fallback_lines = _fallback_concept_candidates(
             source_text
             or "\n".join(_safe_text(concept.get("slide_context")) for concept in concepts),
@@ -1685,7 +1728,6 @@ def _generate_concept_cheatsheet_heuristic(
         lines.extend(distinction_rows[: _section_caps(options)["comparisons"]])
         lines.append("")
     lines.extend(_section_block(labels["examples"], example_lines, _section_caps(options)["examples"]))
-    lines.extend(_section_block(labels["exam"], exam_lines, _section_caps(options)["exam"]))
     return "\n".join(lines).strip()
 
 
@@ -1695,13 +1737,36 @@ def _normalize_concept_records(records: list[dict[str, Any]]) -> list[dict[str, 
         if not isinstance(record, dict):
             continue
         concept = _safe_text(record.get("concept"))
-        slide_context = _safe_text(record.get("slide_context"))
+        slide_context = _sanitize_concept_field(_safe_text(record.get("slide_context")))
+        definition_from_slides = _sanitize_concept_field(_safe_text(record.get("definition_from_slides")))
+        why_it_matters = _sanitize_concept_field(_safe_text(record.get("why_it_matters")))
+        formula_or_measure = _sanitize_concept_field(_safe_text(record.get("formula_or_measure")))
+        distinction = _sanitize_concept_field(_safe_text(record.get("distinction")))
+        example_or_finding = _sanitize_concept_field(_safe_text(record.get("example_or_finding")))
+        final_explanation = _sanitize_concept_field(_safe_text(record.get("final_explanation")))
+        final_definition = _sanitize_concept_field(_safe_text(record.get("final_definition")))
+        web_definition = _sanitize_concept_field(_safe_text(record.get("web_definition")))
+
         if (
             not concept
             or _looks_like_generic_filler(concept)
             or _looks_like_incomplete_concept_name(concept)
             or _looks_like_nonconcept_noise(concept)
-            or (slide_context and _looks_like_nonconcept_noise(slide_context))
+        ):
+            continue
+
+        if not any(
+            (
+                slide_context,
+                definition_from_slides,
+                why_it_matters,
+                formula_or_measure,
+                distinction,
+                example_or_finding,
+                final_explanation,
+                final_definition,
+                web_definition,
+            )
         ):
             continue
 
@@ -1715,15 +1780,15 @@ def _normalize_concept_records(records: list[dict[str, Any]]) -> list[dict[str, 
                     importance=_normalize_importance(_safe_text(record.get("importance"))),
                     needs_web_clarification=bool(record.get("needs_web_clarification")),
                     reason_for_clarification=_safe_text(record.get("reason_for_clarification")),
-                    final_explanation=_safe_text(record.get("final_explanation")),
-                    definition_from_slides=_safe_text(record.get("definition_from_slides")),
-                    why_it_matters=_safe_text(record.get("why_it_matters")),
-                    formula_or_measure=_safe_text(record.get("formula_or_measure")),
-                    distinction=_safe_text(record.get("distinction")),
-                    example_or_finding=_safe_text(record.get("example_or_finding")),
-                    exam_trap=_safe_text(record.get("exam_trap")),
-                    web_definition=_safe_text(record.get("web_definition")),
-                    final_definition=_safe_text(record.get("final_definition")),
+                    final_explanation=final_explanation,
+                    definition_from_slides=definition_from_slides,
+                    why_it_matters=why_it_matters,
+                    formula_or_measure=formula_or_measure,
+                    distinction=distinction,
+                    example_or_finding=example_or_finding,
+                    exam_trap="",
+                    web_definition=web_definition,
+                    final_definition=final_definition,
                     web_source_title=_safe_text(record.get("web_source_title")),
                     web_source_url=_safe_text(record.get("web_source_url")),
                     sources=[
@@ -1742,17 +1807,36 @@ def _normalize_concept_records(records: list[dict[str, Any]]) -> list[dict[str, 
     return normalized
 
 
+def _sanitize_concept_field(text: str) -> str:
+    cleaned = _safe_text(text)
+    if not cleaned:
+        return ""
+    if _looks_like_nonconcept_noise(cleaned):
+        if _looks_like_formula(cleaned):
+            return cleaned
+        return ""
+    return cleaned
+
+
 def _finalize_concept_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen_concepts: set[str] = set()
+    seen_explanations: set[str] = set()
     for raw_record in _normalize_concept_records(records):
         record = _ensure_final_definition(dict(raw_record))
         if not bool(record.get("appears_in_slides", True)):
             continue
-        key = record["concept"].strip().lower()
-        if key in seen:
+        concept_key = _normalized_text_key(record["concept"])
+        explanation_key = _normalized_text_key(
+            _safe_text(record.get("final_explanation"))
+            or _safe_text(record.get("final_definition"))
+            or _safe_text(record.get("slide_context"))
+        )
+        if concept_key in seen_concepts or (explanation_key and explanation_key in seen_explanations):
             continue
-        seen.add(key)
+        seen_concepts.add(concept_key)
+        if explanation_key:
+            seen_explanations.add(explanation_key)
         deduped.append(record)
     return deduped
 
@@ -1760,7 +1844,22 @@ def _finalize_concept_records(records: list[dict[str, Any]]) -> list[dict[str, A
 def _prioritize_concepts(records: list[dict[str, Any]], options: GenerationOptions) -> list[dict[str, Any]]:
     high = [record for record in records if _safe_text(record.get("importance")).lower() == "high"]
     medium = [record for record in records if _safe_text(record.get("importance")).lower() == "medium"]
-    prioritized = high + medium
+    category_rank = {
+        "formula": 0,
+        "measure": 1,
+        "definition": 2,
+        "theory": 3,
+        "distinction": 4,
+        "method": 5,
+        "example": 6,
+    }
+    prioritized = sorted(
+        high + medium,
+        key=lambda record: (
+            category_rank.get(_normalize_category(_safe_text(record.get("category")) or _safe_text(record.get("kind"))), 9),
+            len(_safe_text(record.get("concept"))),
+        ),
+    )
     return prioritized[: _concept_limit(options)]
 
 
@@ -1779,7 +1878,6 @@ def _ensure_final_definition(record: dict[str, Any]) -> dict[str, Any]:
             or _safe_text(record.get("formula_or_measure"))
             or _safe_text(record.get("distinction"))
             or _safe_text(record.get("example_or_finding"))
-            or _safe_text(record.get("exam_trap"))
         )
         record["final_explanation"] = explanation
     if not _safe_text(record.get("importance")):
@@ -1815,6 +1913,404 @@ def _safe_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _normalized_text_key(text: str) -> str:
+    normalized = re.sub(r"[^\w\s]+", " ", str(text or "").casefold(), flags=re.UNICODE)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _repair_local_spacing(text: str) -> str:
+    return re.sub(r"\s+([,:;])", r"\1", text)
+
+
+def _extract_structured_concepts_from_source(source_text: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+
+    for raw_line in _merge_continuation_lines(source_text.splitlines()):
+        plain = _strip_markdown(raw_line)
+        if not plain or _looks_like_nonconcept_noise(plain):
+            continue
+
+        concept_name, detail = _split_inline_concept_line(plain)
+        if not concept_name or not detail:
+            continue
+
+        category = _infer_concept_category(f"{concept_name}: {detail}")
+        record = ConceptRecord(
+            concept=concept_name,
+            category=category,
+            slide_context=plain,
+            appears_in_slides=True,
+            importance=_heuristic_importance(detail, category),
+            needs_web_clarification=False,
+            reason_for_clarification="",
+            final_explanation=detail,
+            definition_from_slides=detail if category in {"definition", "theory", "method"} else "",
+            why_it_matters=detail if _is_interpretive_line(detail) and category in {"definition", "theory", "method"} else "",
+            formula_or_measure=detail if category in {"formula", "measure"} else "",
+            distinction=detail if category == "distinction" else "",
+            example_or_finding=detail if category == "example" else "",
+            exam_trap="",
+            final_definition=detail,
+            kind=category,
+        )
+        records.append(asdict(record))
+
+    for heading, body_lines in _split_slide_sections(source_text):
+        concept_name = _clean_section_heading(heading)
+        if not concept_name or _is_generic_section_heading(concept_name):
+            continue
+
+        filtered_lines = _section_body_candidates(body_lines)
+        category = _infer_section_category(concept_name, filtered_lines)
+        definition = _pick_section_definition(filtered_lines)
+        why = _pick_section_why(filtered_lines)
+        formula = _pick_section_formula(filtered_lines)
+        example = _pick_section_example(filtered_lines)
+
+        if not any((definition, why, formula, example)):
+            continue
+
+        record = ConceptRecord(
+            concept=concept_name,
+            category=category,
+            slide_context=" ".join(filtered_lines[:3]),
+            appears_in_slides=True,
+            importance=_heuristic_importance(" ".join((concept_name, definition, why, formula, example)), category),
+            needs_web_clarification=False,
+            reason_for_clarification="",
+            final_explanation=definition or formula or example,
+            definition_from_slides=definition,
+            why_it_matters=why,
+            formula_or_measure=formula,
+            distinction=definition if category == "distinction" else "",
+            example_or_finding=example if category == "example" else "",
+            exam_trap="",
+            final_definition=definition or formula or example,
+            kind=category,
+        )
+        records.append(asdict(record))
+
+    return records
+
+
+def _split_slide_sections(source_text: str) -> list[tuple[str, list[str]]]:
+    sections: list[tuple[str, list[str]]] = []
+    heading = ""
+    body: list[str] = []
+
+    for raw_line in source_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("#"):
+            if heading or body:
+                sections.append((heading, body))
+            heading = _strip_markdown(line)
+            body = []
+            continue
+        body.append(raw_line)
+
+    if heading or body:
+        sections.append((heading, body))
+
+    return sections
+
+
+def _clean_section_heading(heading: str) -> str:
+    cleaned = _strip_markdown(heading)
+    cleaned = re.sub(r"^\d+\s*[-.)]\s*", "", cleaned).strip()
+    cleaned = re.sub(r"\bcont['’]d\b.*$", "", cleaned, flags=re.IGNORECASE).strip(" -:")
+    cleaned = re.sub(r"\bcontinued\b.*$", "", cleaned, flags=re.IGNORECASE).strip(" -:")
+    cleaned = re.sub(r"\s+\(class[^)]*\)$", "", cleaned, flags=re.IGNORECASE).strip()
+
+    if cleaned.lower().startswith("node b as a"):
+        quoted = re.search(r"[\"“]([^\"”]+)[\"”]", cleaned)
+        if quoted:
+            cleaned = quoted.group(1)
+
+    if cleaned in {"co-ordinator", "coordinator"}:
+        return "Coordinator"
+    if cleaned.lower() in {"consultant", "gatekeeper", "representative", "liaison", "itinerant broker"}:
+        return cleaned.title()
+
+    return cleaned
+
+
+def _is_generic_section_heading(heading: str) -> bool:
+    lowered = _normalized_text_key(heading)
+    if not lowered:
+        return True
+    if heading.strip().endswith("?"):
+        return True
+
+    generic_starts = (
+        "source",
+        "agenda",
+        "social network analysis",
+        "qmss",
+        "gregory m eirich",
+        "the ucinet output",
+        "conclusions so far",
+        "constraint in r",
+        "look at constraint in r",
+        "how did i do this",
+        "interesting extension",
+        "quite the contrary",
+        "see",
+        "thanks to",
+        "remember this",
+    )
+    if any(lowered.startswith(prefix) for prefix in generic_starts):
+        return True
+
+    if " in r" in lowered or lowered.endswith(" in r"):
+        return True
+    if lowered.startswith("who brokers how"):
+        return True
+    if lowered in {"triads", "measures of competition", "structural holes 2", "structural holes 4"}:
+        return True
+
+    return False
+
+
+def _section_body_candidates(body_lines: list[str]) -> list[str]:
+    candidates: list[str] = []
+    for raw_line in _merge_continuation_lines(body_lines):
+        plain = _strip_markdown(raw_line)
+        if (
+            not plain
+            or _looks_like_generic_filler(plain)
+            or _looks_like_nonconcept_noise(plain)
+            or _looks_like_incomplete_table_fragment(plain)
+        ):
+            continue
+        if _looks_incomplete(plain) and not _looks_like_formula(plain):
+            continue
+        candidates.append(_compact_line(plain, 42))
+    return _dedupe_lines(candidates)
+
+
+def _infer_section_category(concept_name: str, body_lines: list[str]) -> str:
+    heading_lower = concept_name.lower()
+    combined = " ".join([concept_name] + body_lines).lower()
+    if "lazega" in heading_lower or heading_lower.endswith(" data"):
+        return "example"
+    if any(
+        keyword in heading_lower
+        for keyword in ("effective size", "efficiency", "constraint", "hierarchy", "degree", "density", "redundancy")
+    ):
+        return "measure"
+    if any(
+        keyword in heading_lower
+        for keyword in ("coordinator", "consultant", "gatekeeper", "representative", "liaison", "itinerant broker")
+    ):
+        return "theory"
+    if "lazega" in combined or "example" in combined:
+        return "example"
+    if _looks_like_comparison(combined) or all(token in combined for token in ("incoming", "outgoing")):
+        return "distinction"
+    if _looks_like_formula(combined):
+        return "formula"
+    if any(keyword in combined for keyword in ("role", "brokerage", "structural hole", "triad")):
+        return "theory"
+    return "definition"
+
+
+def _pick_section_definition(lines: list[str]) -> str:
+    for line in lines:
+        if _is_interpretive_line(line) or _looks_like_formula(line):
+            continue
+        return line
+    return ""
+
+
+def _pick_section_why(lines: list[str]) -> str:
+    for line in lines:
+        if _is_interpretive_line(line):
+            return line
+    return ""
+
+
+def _pick_section_formula(lines: list[str]) -> str:
+    for line in lines:
+        lowered = line.lower()
+        if _looks_like_formula(line) or "divided by" in lowered or "minus the average degree" in lowered:
+            return line
+    return ""
+
+
+def _pick_section_example(lines: list[str]) -> str:
+    for line in lines:
+        lowered = line.lower()
+        if any(keyword in lowered for keyword in ("lazega", "partners", "associates", "for example")):
+            return line
+    return ""
+
+
+def _split_inline_concept_line(line: str) -> tuple[str, str]:
+    stripped = line.strip()
+    if not stripped:
+        return "", ""
+    if stripped.startswith((">", ".")):
+        return "", ""
+
+    formula_match = re.match(r"^([A-Za-z][A-Za-z0-9'’/\-\s]{1,40})\s*=\s*(.+)$", stripped)
+    if formula_match:
+        concept = _clean_inline_concept_name(formula_match.group(1))
+        detail = _compact_line(f"{concept} = {formula_match.group(2).strip()}", 48) if concept else ""
+        if not concept or not _looks_like_concept_detail(detail):
+            return "", ""
+        return concept, detail
+
+    match = re.match(r"^([A-Za-z][A-Za-z0-9_{}'’/\-\s]{1,50}?)(?:--[^:.]+)?[:.]\s+(.+)$", stripped)
+    if not match:
+        return "", ""
+
+    concept = _clean_inline_concept_name(match.group(1))
+    detail = _compact_line(match.group(2).strip(), 48)
+    if not concept or not detail or _looks_like_nonconcept_noise(detail) or not _looks_like_concept_detail(detail):
+        return "", ""
+
+    normalized_label = re.sub(r"[{}]", "", concept)
+    if re.fullmatch(r"[wbt](?:_[A-Za-zIO]+)?", normalized_label, flags=re.IGNORECASE):
+        role_prefix = detail.split(";", 1)[0].strip()
+        if role_prefix.lower().endswith("role"):
+            concept = role_prefix[:-4].strip()
+            if ";" in detail:
+                detail = detail.split(";", 1)[1].strip()
+        elif normalized_label.lower() == "t":
+            concept = "Total brokerage occupancy"
+
+    return concept, detail
+
+
+def _clean_inline_concept_name(name: str) -> str:
+    cleaned = name.strip(" -:;,.")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"--.*$", "", cleaned).strip(" -:;,.")
+    cleaned = re.sub(r"\s+role$", "", cleaned, flags=re.IGNORECASE)
+    if len(cleaned.split()) > 7:
+        return ""
+    if cleaned.lower().startswith(
+        (
+            "the first way",
+            "the second way",
+            "helpful notes",
+            "summary statistics",
+            "how did i do this",
+            "see",
+            "quite the contrary",
+            "by categories of",
+            "estimate std",
+            "these results mirror",
+            "who brokers how",
+            "gregory m",
+            "robert a",
+            "mark riddle",
+        )
+    ):
+        return ""
+    if _looks_like_generic_filler(cleaned) or _looks_like_nonconcept_noise(cleaned) or _looks_like_incomplete_concept_name(cleaned):
+        return ""
+    if cleaned.lower() in {"qmss", "status", "error", "estimate"}:
+        return ""
+    if cleaned in {"co-ordinator", "coordinator"}:
+        return "Coordinator"
+    if cleaned.lower() in {"consultant", "gatekeeper", "representative", "liaison", "itinerant broker"}:
+        return cleaned.title()
+    return cleaned
+
+
+def _is_interpretive_line(line: str) -> bool:
+    lowered = line.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "higher the better",
+            "lower the better",
+            "less redundancy",
+            "more constrained",
+            "shrinks",
+            "can change depending",
+            "counts non-redundant",
+            "depends on this choice",
+            "the better",
+        )
+    )
+
+
+def _looks_like_concept_detail(detail: str) -> bool:
+    lowered = detail.lower().strip()
+    if not lowered:
+        return False
+    if len(detail.split()) < 3 and not _looks_like_formula(detail):
+        return False
+    if any(
+        keyword in lowered
+        for keyword in (
+            "measure",
+            "role",
+            "network",
+            "constraint",
+            "efficien",
+            "effective",
+            "broker",
+            "group",
+            "tie",
+            "node",
+            "alter",
+            "redundan",
+            "incoming",
+            "outgoing",
+            "structural",
+            "contact",
+            "occupancy",
+            "better",
+        )
+    ):
+        return True
+    return len(detail.split()) >= 7 and not _looks_like_incomplete_table_fragment(detail)
+
+
+def _merge_continuation_lines(lines: list[str]) -> list[str]:
+    merged: list[str] = []
+    index = 0
+
+    while index < len(lines):
+        current = lines[index].strip()
+        if not current:
+            merged.append("")
+            index += 1
+            continue
+
+        next_index = index + 1
+        while next_index < len(lines):
+            following = lines[next_index].strip()
+            if not following:
+                break
+            if following.startswith(("#", "-", "*", "|", ">", ".")) or re.match(r"^\d+\.\s+", following):
+                break
+            if current.endswith((".", "?", "!", ":", ";")):
+                break
+            if following[:1].islower() or following[:1].isdigit() or current.endswith("->"):
+                current = _repair_local_spacing(f"{current} {following}")
+                next_index += 1
+                continue
+            break
+
+        merged.append(current)
+        index = next_index
+
+    return merged
+
+
+def _looks_like_incomplete_table_fragment(text: str) -> bool:
+    lowered = text.lower().strip()
+    if lowered.startswith(("status |", "variable |", "total |", "-------------", "---------", "(all)", "(in-coming)", "(out-going)")):
+        return True
+    if re.fullmatch(r"[\d.\s|~A-Za-z_-]+", text) and text.count("|") >= 1 and sum(ch.isdigit() for ch in text) >= 4:
+        return True
+    return False
+
+
 def _infer_concept_name(text: str) -> str:
     if ":" in text:
         head = text.split(":", 1)[0].strip()
@@ -1833,8 +2329,17 @@ def _infer_concept_name(text: str) -> str:
 
 
 def _infer_concept_category(text: str) -> str:
-    if _looks_like_exam_signal(text):
-        return "exam_trap"
+    concept_name = _infer_concept_name(text).lower()
+    if any(
+        keyword in concept_name
+        for keyword in ("effective size", "efficiency", "constraint", "hierarchy", "degree", "density", "redundancy")
+    ):
+        return "measure"
+    if any(
+        keyword in concept_name
+        for keyword in ("coordinator", "consultant", "gatekeeper", "representative", "liaison", "itinerant broker")
+    ) or "broker mediates" in text.lower():
+        return "theory"
     if _looks_like_example(text):
         return "example"
     if _looks_like_comparison(text):
@@ -1854,17 +2359,25 @@ def _infer_concept_kind(text: str) -> str:
 
 def _normalize_category(value: str) -> str:
     lowered = value.strip().lower()
-    allowed = {"definition", "measure", "formula", "theory", "method", "distinction", "example", "exam_trap"}
+    allowed = {"definition", "measure", "formula", "theory", "method", "distinction", "example"}
     if lowered in allowed:
         return lowered
+    if "/" in lowered:
+        for part in [piece.strip() for piece in lowered.split("/")]:
+            if part in allowed:
+                return part
     aliases = {
         "term": "definition",
         "concept": "definition",
         "model": "theory",
+        "theory/model": "theory",
+        "dataset/example": "example",
+        "dataset": "example",
+        "software/package choice": "method",
         "study": "example",
         "finding": "example",
         "comparison": "distinction",
-        "trap": "exam_trap",
+        "trap": "definition",
     }
     return aliases.get(lowered, "definition")
 
@@ -1879,7 +2392,7 @@ def _normalize_importance(value: str) -> str:
 def _heuristic_importance(text: str, category: str) -> str:
     category = _normalize_category(category)
     lowered = text.lower()
-    if category in {"formula", "measure", "theory", "distinction", "exam_trap"}:
+    if category in {"formula", "measure", "theory", "distinction"}:
         return "high"
     if any(token in lowered for token in ("important", "remember", "exam", "trap", "formula", "theory", "model")):
         return "high"
@@ -1890,10 +2403,9 @@ def _heuristic_importance(text: str, category: str) -> str:
     return "low"
 
 
-def _build_teaching_bullet(name: str, definition: str, why: str, trap: str) -> str:
+def _build_teaching_bullet(name: str, definition: str, why: str) -> str:
     definition = _strip_repeated_label(name, definition)
     why = _strip_repeated_label(name, why)
-    trap = _strip_repeated_label(name, trap)
     parts = []
     if name and definition:
         parts.append(f"{name}: {definition}")
@@ -1901,15 +2413,16 @@ def _build_teaching_bullet(name: str, definition: str, why: str, trap: str) -> s
         parts.append(definition)
     if why:
         parts.append(f"Why it matters / how to identify it: {why}")
-    if trap:
-        parts.append(f"Exam trap: {trap}")
     return " ".join(parts).strip()
 
 
-def _build_measure_bullet(name: str, formula: str, meaning: str, trap: str) -> str:
+def _build_measure_bullet(name: str, formula: str, meaning: str) -> str:
     formula = _strip_repeated_label(name, formula)
     meaning = _strip_repeated_label(name, meaning)
-    trap = _strip_repeated_label(name, trap)
+    if _normalized_text_key(formula) == _normalized_text_key(meaning):
+        meaning = ""
+    if _normalized_text_key(meaning) in {"mean", "summary statistics: mean"}:
+        meaning = ""
     parts = []
     if name:
         parts.append(f"{name}:")
@@ -1917,8 +2430,6 @@ def _build_measure_bullet(name: str, formula: str, meaning: str, trap: str) -> s
         parts.append(formula)
     if meaning:
         parts.append(f"What it means: {meaning}")
-    if trap:
-        parts.append(f"Exam trap: {trap}")
     return " ".join(parts).strip()
 
 
@@ -1972,8 +2483,6 @@ def _collect_candidates(text: str) -> dict[str, list[str]]:
             categories["comparisons"].append(plain)
         if _looks_like_method(plain):
             categories["methods"].append(plain)
-        if _looks_like_exam_signal(plain):
-            categories["exam"].append(plain)
         if _looks_like_example(plain):
             categories["examples"].append(plain)
 
@@ -2001,13 +2510,12 @@ def _section_caps(options: GenerationOptions) -> dict[str, int]:
     }.get(options.density, 0)
 
     return {
-        "concepts": max(4, base + modifier),
+        "concepts": max(5, base + modifier),
         "definitions": max(3, base - 1 + modifier),
-        "formulas": max(3, base - 1 + modifier),
+        "formulas": max(4, base + modifier),
         "comparisons": max(3, base - 2 + modifier),
         "methods": max(3, base - 1 + modifier),
-        "exam": max(3, base - 2 + modifier),
-        "examples": max(2, base - 3 + modifier),
+        "examples": max(2, base - 2 + modifier),
         "checklist": max(5, base + modifier),
     }
 
@@ -2094,7 +2602,6 @@ def _section_labels(language: str) -> dict[str, str]:
             "formulas": "2. 公式 / 指标",
             "distinctions": "3. 必会区分",
             "examples": "4. 经典例子 / 发现",
-            "exam": "5. 考试陷阱",
         }
     if language == "Bilingual":
         return {
@@ -2102,14 +2609,12 @@ def _section_labels(language: str) -> dict[str, str]:
             "formulas": "2. 公式 / 指标 / Key Measures / Formulas",
             "distinctions": "3. 必会区分 / Must-Know Distinctions",
             "examples": "4. 经典例子 / 发现 / Classic Examples / Findings",
-            "exam": "5. 考试陷阱 / Exam Traps",
         }
     return {
         "concepts": "1. Core Concepts",
         "formulas": "2. Key Measures / Formulas",
         "distinctions": "3. Must-Know Distinctions",
         "examples": "4. Classic Examples / Findings",
-        "exam": "5. Exam Traps",
     }
 
 
@@ -2263,6 +2768,8 @@ def _looks_like_nonconcept_noise(text: str) -> bool:
     if not lowered:
         return False
 
+    if lowered in {"topic", "distinction", "what to remember"}:
+        return True
     if "http://" in lowered or "https://" in lowered or "www." in lowered:
         return True
     if re.search(r"\(\d{4}\)\s*[:.,]\s*\d", text):
@@ -2270,6 +2777,28 @@ def _looks_like_nonconcept_noise(text: str) -> bool:
     if re.search(r"\b(?:doi|issn|isbn)\b", lowered):
         return True
     if lowered.startswith(("repository", "references", "bibliography")):
+        return True
+    if lowered.startswith(
+        (
+            ". ",
+            ">",
+            "summary statistics",
+            "input dataset",
+            "output dataset",
+            "method:",
+            "by categories of",
+            "estimate std",
+            "structural hole measures",
+            "put aside statistical significance",
+            "is the research question clearly stated",
+            "remember from day",
+            "how did i do this",
+            "see?",
+            "thanks to",
+        )
+    ):
+        return True
+    if re.search(r"\b(?:install\.packages|library\(|cbind\(|merge\(|summary\(lm|graph twoway|recode)\b", lowered):
         return True
     if re.search(r"\b(?:bootstrap|reg|areg|xtreg|logit|probit|summarize|tabulate|egen|gen)\b", lowered) and ":" in lowered:
         return True
