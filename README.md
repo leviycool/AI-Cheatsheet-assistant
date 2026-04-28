@@ -1,10 +1,43 @@
 # Cheatsheet AI Assistant
 
-Cheatsheet AI Assistant is a Streamlit app that turns lecture slides, notes, PDFs, and documents into a compact, exam-oriented cheat sheet.
+Cheatsheet AI Assistant is a Streamlit app that turns lecture slides and course documents into compact, exam-oriented cheat sheets.
 
-## 快速开始
+Instead of producing a page-by-page summary, the app is designed to extract the material students are most likely to revise from:
 
-推荐直接使用项目里已经补好的 `Makefile`：
+- core concepts
+- measures and formulas
+- important distinctions
+- examples and findings that clarify the lecture
+
+The current app is built for messy academic inputs such as PDFs, slide decks, lecture notes, and mixed OCR text.
+
+## What It Does
+
+- Upload `PDF`, `PPTX`, `DOCX`, or `TXT` files
+- Clean noisy slide extraction and chunk long documents
+- Generate an A4-style cheat sheet in English, Chinese, or bilingual output
+- Prefer a concept-first structure over raw slide extraction
+- Optionally use web search to clarify concepts that already appear in the uploaded slides
+- Show token usage from OpenAI response metadata
+- Show source transparency in a `Sources Used` panel
+- Export results as `Markdown`, `PDF`, or `DOCX`
+
+## How It Works
+
+In OpenAI mode, the app follows a multi-step pipeline:
+
+1. Parse and clean uploaded files
+2. Extract candidate concepts from the slides
+3. Clean and prioritize the concept inventory
+4. Optionally clarify slide concepts with web search
+5. Generate a compact cheat sheet from the cleaned concept list
+6. Audit the final cheat sheet for duplication, OCR noise, and unsupported content
+
+If no OpenAI API key is configured, the app falls back to a local heuristic mode. That mode is useful for offline testing, but the best results come from OpenAI mode.
+
+## Quick Start
+
+The repository includes a `Makefile` for the common setup flow:
 
 ```bash
 make install
@@ -12,17 +45,15 @@ cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 make run
 ```
 
-启动后，终端会显示本地地址，通常是 `http://localhost:8501`。
+The local app usually starts at:
 
-## Python 版本说明
+```text
+http://localhost:8501
+```
 
-当前这个目录在本机是用 `Python 3.8.2` 运行的，所以我已经把 `Streamlit` 依赖约束调整为与 `Python 3.8` 兼容的版本范围。
-如果你以后切到 `Python 3.9+`，也可以再把 `streamlit` 版本升级到更新的分支。
-现在 `requirements.txt` 已经按 Python 版本做了兼容处理：本地 `3.8` 会安装兼容版本，云端 `3.9+` 会安装较新的 `Streamlit`。
+## Manual Setup
 
-## 手动搭建 Streamlit
-
-如果你不想用 `make`，也可以手动执行：
+If you prefer not to use `make`:
 
 ```bash
 python3 -m venv .venv
@@ -32,62 +63,122 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## OpenAI 配置
+## OpenAI Configuration
 
-这个项目现在同时支持两种配置方式：
+The app supports both environment variables and Streamlit secrets.
 
-1. 环境变量
+### Option 1: Environment Variables
 
 ```bash
-export OPENAI_API_KEY="your_api_key_here"
+export OPENAI_API_KEY="sk-your-key-here"
 export OPENAI_MODEL="gpt-5.2"
 ```
 
-2. Streamlit secrets
+### Option 2: Streamlit Secrets
 
-先复制示例文件：
+Copy the example file:
 
 ```bash
 cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 ```
 
-然后把 `.streamlit/secrets.toml` 改成这样：
+Then set:
 
 ```toml
-OPENAI_API_KEY = "your_api_key_here"
+OPENAI_API_KEY = "sk-your-key-here"
 OPENAI_MODEL = "gpt-5.2"
 # Optional for regional OpenAI projects:
 # OPENAI_BASE_URL = "https://us.api.openai.com/v1"
 ```
 
-如果没有配置 OpenAI Key，应用也能运行，只是会自动切到本地启发式模式，生成质量会弱一些。
-
-### Streamlit Cloud 里怎么填
-
-你截图里的 `Advanced settings -> Secrets` 文本框，直接粘贴下面两行就可以：
-
-```toml
-OPENAI_API_KEY = "sk-你的真实key"
-OPENAI_MODEL = "gpt-5.2"
-# Optional for regional OpenAI projects:
-# OPENAI_BASE_URL = "https://us.api.openai.com/v1"
-```
-
-也支持这种分组写法：
+The app also supports grouped secrets:
 
 ```toml
 [openai]
-api_key = "sk-你的真实key"
+api_key = "sk-your-key-here"
 model = "gpt-5.2"
 # Optional for regional OpenAI projects:
 # base_url = "https://us.api.openai.com/v1"
 ```
 
-如果你的 OpenAI 项目提示 `incorrect regional hostname`，就把 `OPENAI_BASE_URL` 设成报错里提示的主机地址；例如美国区域通常是 `https://us.api.openai.com/v1`。
+## Streamlit Community Cloud
 
-这两种格式项目都已经支持，而且 `secrets` 不会进入 Git 仓库。
+To deploy on Streamlit Community Cloud:
 
-## 项目结构
+1. Connect the repository
+2. Set the branch to `main`
+3. Set the main file path to `app.py`
+4. Add your secrets in `Advanced settings -> Secrets`
+
+Example secrets:
+
+```toml
+OPENAI_API_KEY = "sk-your-key-here"
+OPENAI_MODEL = "gpt-5.2"
+# Optional for regional OpenAI projects:
+# OPENAI_BASE_URL = "https://us.api.openai.com/v1"
+```
+
+## Token Usage
+
+The app reads token usage directly from OpenAI API response metadata. It does not estimate usage by asking the model.
+
+The `Token Usage` panel shows:
+
+- model name
+- input tokens
+- output tokens
+- total tokens
+- per-step usage across extraction, cleaning, web clarification, generation, and audit
+- estimated cost when pricing is configured
+- raw debug metadata when debug mode is enabled
+
+## Troubleshooting
+
+### `incorrect regional hostname`
+
+If your OpenAI project requires a regional hostname, set:
+
+```toml
+OPENAI_BASE_URL = "https://us.api.openai.com/v1"
+```
+
+This app also tries to recover automatically when OpenAI returns a hostname hint, but explicitly setting the correct base URL is more reliable.
+
+### The app falls back to heuristic mode
+
+If you see messages about heuristic generation, check:
+
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `OPENAI_BASE_URL` if your project is regional
+- the `Token Usage` panel and raw debug info
+
+### Output quality is weak
+
+Best results usually come from:
+
+- lecture slides with recognizable headings
+- OpenAI mode instead of heuristic mode
+- enabling formulas when the lecture contains measures
+- keeping web search enabled only when you want extra clarification for slide-supported concepts
+
+## Limitations
+
+- OCR-heavy PDFs can still produce noisy text
+- Heuristic mode is intentionally conservative and may miss concepts
+- Web search is only meant to clarify concepts already present in the uploaded lecture material
+- The app is optimized for study-sheet generation, not for full lecture transcription or general summarization
+
+## Development
+
+Basic checks:
+
+```bash
+make check
+```
+
+## Project Structure
 
 ```text
 app.py
@@ -105,37 +196,6 @@ requirements.txt
 README.md
 ```
 
-## 功能概览
+## License
 
-- 支持上传 `PDF`、`PPTX`、`DOCX`、`TXT`
-- 自动抽取和清洗课程资料文本
-- 长文本会先分块再汇总
-- 可按语言、篇幅、重点方向和细节密度生成小抄
-- 支持在网页里直接编辑结果
-- 支持导出 `Markdown`、`PDF`、`DOCX`
-
-## Streamlit 项目内已补充的内容
-
-- `.streamlit/config.toml`
-  让项目具备默认主题、自动保存刷新和更标准的 Streamlit 配置
-- `.streamlit/secrets.toml.example`
-  方便本地和部署时填写密钥
-- `Makefile`
-  提供 `make install`、`make run`、`make check`
-- `.gitignore`
-  忽略 `.venv`、`secrets.toml` 和缓存文件
-
-## 校验命令
-
-可以用下面的命令做一次基础检查：
-
-```bash
-make check
-```
-
-## 运行模式
-
-- `OpenAI mode`
-  配置了 `OPENAI_API_KEY` 后，会调用 OpenAI 进行分块总结和最终生成
-- `Heuristic mode`
-  没有配置密钥时，仍然能跑通完整流程，但更适合演示或离线原型
+Add your preferred license here before publishing broadly.
