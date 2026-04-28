@@ -28,6 +28,19 @@ from cheatsheet_ai.processing import chunk_text, clean_extracted_text
 
 SUPPORTED_FILE_TYPES = ["pdf", "pptx", "docx", "txt"]
 
+MODEL_PRICING_PER_MILLION = {
+    "gpt-5.2": {"input": 1.75, "cached_input": 0.175, "output": 14.00},
+    "gpt-5.1": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
+    "gpt-5": {"input": 1.25, "cached_input": 0.125, "output": 10.00},
+    "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.00},
+    "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.40},
+    "gpt-4.1": {"input": 2.00, "cached_input": 0.50, "output": 8.00},
+    "gpt-4.1-mini": {"input": 0.40, "cached_input": 0.10, "output": 1.60},
+    "gpt-4.1-nano": {"input": 0.10, "cached_input": 0.025, "output": 0.40},
+    "gpt-4o": {"input": 2.50, "cached_input": 1.25, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "cached_input": 0.075, "output": 0.60},
+}
+
 
 st.set_page_config(
     page_title="Cheatsheet AI Assistant",
@@ -193,13 +206,14 @@ def _generate_from_existing_text(options: GenerationOptions) -> None:
 def _run_generation_pipeline(options: GenerationOptions) -> None:
     cleaned_text = st.session_state.get("cleaned_text", "")
     chunks = chunk_text(cleaned_text)
-    summaries, summary_usage = summarize_chunks(chunks, options)
-    draft_markdown, draft_usage = generate_cheatsheet(summaries, options, source_text=cleaned_text)
+    summaries, extraction_usage = summarize_chunks(chunks, options)
+    draft_markdown, generation_usage = generate_cheatsheet(summaries, options, source_text=cleaned_text)
     cheatsheet_markdown, audit_usage = audit_cheatsheet(draft_markdown, summaries, options)
     total_usage = UsageStats()
-    total_usage.add(summary_usage)
-    total_usage.add(draft_usage)
+    total_usage.add(extraction_usage)
+    total_usage.add(generation_usage)
     total_usage.add(audit_usage)
+    model_name = get_openai_model() if total_usage.api_calls else ""
 
     st.session_state["chunk_count"] = len(chunks)
     st.session_state["chunk_summaries"] = summaries
@@ -207,12 +221,15 @@ def _run_generation_pipeline(options: GenerationOptions) -> None:
     st.session_state["editable_cheatsheet"] = cheatsheet_markdown
     st.session_state["last_options"] = asdict(options)
     st.session_state["generation_variant"] = options.variant
-    st.session_state["openai_usage"] = {
-        "model": get_openai_model() if total_usage.api_calls else "",
-        "chunk_summary": asdict(summary_usage),
-        "draft_generation": asdict(draft_usage),
-        "accuracy_audit": asdict(audit_usage),
+    st.session_state["token_usage"] = {
+        "model": model_name,
+        "available": total_usage.usage_available_calls > 0,
+        "extraction": asdict(extraction_usage),
+        "generation": asdict(generation_usage),
+        "audit": asdict(audit_usage),
         "total": asdict(total_usage),
+        "estimated_cost_usd": _estimate_cost_usd(model_name, total_usage),
+        "pricing_configured": _get_pricing_for_model(model_name) is not None,
     }
 
 
@@ -230,8 +247,6 @@ def _render_results() -> None:
     stats_columns[0].metric("Source words", st.session_state.get("source_word_count", 0))
     stats_columns[1].metric("Chunks", st.session_state.get("chunk_count", 0))
     stats_columns[2].metric("Mode", "OpenAI" if is_openai_configured() else "Heuristic")
-
-    _render_usage_summary()
 
     tabs = st.tabs(["Edit", "Preview", "Source Preview"])
 
@@ -257,6 +272,8 @@ def _render_results() -> None:
                     height=260,
                     disabled=True,
                 )
+
+    _render_token_usage()
 
     st.subheader("Export")
     export_name = _slugify_filename(
@@ -322,47 +339,90 @@ def _slugify_filename(name: str) -> str:
     return slug or "cheatsheet-ai-output"
 
 
-def _render_usage_summary() -> None:
-    usage = st.session_state.get("openai_usage", {})
+def _render_token_usage() -> None:
+    usage = st.session_state.get("token_usage", {})
     total = usage.get("total", {})
 
-    if not total.get("api_calls", 0):
+    if not usage:
         return
 
-    st.caption(f"Latest OpenAI usage ({usage.get('model', 'unknown model')})")
+    st.subheader("Token Usage")
 
-    usage_columns = st.columns(4)
-    usage_columns[0].metric("Prompt tokens", _format_number(total.get("input_tokens", 0)))
-    usage_columns[1].metric("Completion tokens", _format_number(total.get("output_tokens", 0)))
-    usage_columns[2].metric("Total tokens", _format_number(total.get("total_tokens", 0)))
-    usage_columns[3].metric("API calls", _format_number(total.get("api_calls", 0)))
+    with st.expander("Token Usage", expanded=True):
+        if not total.get("api_calls", 0):
+            st.info("Token usage not available for this request.")
+            return
 
-    with st.expander("Token usage details"):
-        detail_columns = st.columns(4)
-        detail_columns[0].metric("Cached prompt", _format_number(total.get("cached_input_tokens", 0)))
-        detail_columns[1].metric("Reasoning tokens", _format_number(total.get("reasoning_tokens", 0)))
+        if not usage.get("available", False):
+            st.info("Token usage not available for this request.")
+            return
+
+        top_columns = st.columns(4)
+        top_columns[0].metric("Model", usage.get("model") or "Unknown")
+        top_columns[1].metric("Input tokens", _format_number(total.get("input_tokens", 0)))
+        top_columns[2].metric("Output tokens", _format_number(total.get("output_tokens", 0)))
+        top_columns[3].metric("Total tokens", _format_number(total.get("total_tokens", 0)))
+
+        if usage.get("pricing_configured"):
+            st.metric("Estimated cost (USD)", _format_cost(usage.get("estimated_cost_usd")))
+        else:
+            st.caption("Estimated cost unavailable because pricing is not configured for this model.")
+
+        detail_columns = st.columns(3)
+        detail_columns[0].metric(
+            "Extraction",
+            _format_number(usage.get("extraction", {}).get("total_tokens", 0)),
+        )
+        detail_columns[1].metric(
+            "Cheatsheet generation",
+            _format_number(usage.get("generation", {}).get("total_tokens", 0)),
+        )
         detail_columns[2].metric(
-            "Draft generation",
-            _format_number(usage.get("draft_generation", {}).get("total_tokens", 0)),
-        )
-        detail_columns[3].metric(
-            "Accuracy audit",
-            _format_number(usage.get("accuracy_audit", {}).get("total_tokens", 0)),
+            "Audit / revision",
+            _format_number(usage.get("audit", {}).get("total_tokens", 0)),
         )
 
-        chunk_columns = st.columns(2)
-        chunk_columns[0].metric(
-            "Chunk summary tokens",
-            _format_number(usage.get("chunk_summary", {}).get("total_tokens", 0)),
-        )
-        chunk_columns[1].metric(
-            "Audit API calls",
-            _format_number(usage.get("accuracy_audit", {}).get("api_calls", 0)),
-        )
+        extra_columns = st.columns(3)
+        extra_columns[0].metric("API calls", _format_number(total.get("api_calls", 0)))
+        extra_columns[1].metric("Cached input", _format_number(total.get("cached_input_tokens", 0)))
+        extra_columns[2].metric("Reasoning tokens", _format_number(total.get("reasoning_tokens", 0)))
 
 
 def _format_number(value: int) -> str:
     return f"{int(value):,}"
+
+
+def _format_cost(value: float | None) -> str:
+    if value is None:
+        return "Unavailable"
+    return f"${value:,.4f}"
+
+
+def _estimate_cost_usd(model_name: str, usage: UsageStats) -> float | None:
+    pricing = _get_pricing_for_model(model_name)
+    if pricing is None or usage.usage_available_calls == 0:
+        return None
+
+    cached_input_tokens = min(usage.cached_input_tokens, usage.input_tokens)
+    uncached_input_tokens = max(usage.input_tokens - cached_input_tokens, 0)
+
+    input_cost = uncached_input_tokens * pricing["input"] / 1_000_000
+    cached_input_cost = cached_input_tokens * pricing.get("cached_input", pricing["input"]) / 1_000_000
+    output_cost = usage.output_tokens * pricing["output"] / 1_000_000
+    return input_cost + cached_input_cost + output_cost
+
+
+def _get_pricing_for_model(model_name: str) -> dict[str, float] | None:
+    if not model_name:
+        return None
+    if model_name in MODEL_PRICING_PER_MILLION:
+        return MODEL_PRICING_PER_MILLION[model_name]
+
+    for configured_name, pricing in MODEL_PRICING_PER_MILLION.items():
+        if model_name.startswith(f"{configured_name}-"):
+            return pricing
+
+    return None
 
 
 if __name__ == "__main__":

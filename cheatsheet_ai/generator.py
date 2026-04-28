@@ -7,6 +7,7 @@ import re
 import textwrap
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Any
 
 try:
     from openai import OpenAI
@@ -22,14 +23,11 @@ except Exception:  # pragma: no cover - safe fallback when dependency is absent
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 
 CHEATSHEET_SECTION_ORDER = [
-    "Lecture / Class",
-    "Core Topics",
-    "Key Definitions",
-    "Formulas / Measures",
-    "Key Comparisons",
-    "Methods / Procedures",
-    "Examples / Findings",
-    "Exam Traps / Things to Remember",
+    "1. Core Concepts",
+    "2. Key Measures / Formulas",
+    "3. Must-Know Distinctions",
+    "4. Classic Examples / Findings",
+    "5. Exam Traps",
 ]
 
 
@@ -49,6 +47,7 @@ class GenerationOptions:
 @dataclass
 class UsageStats:
     api_calls: int = 0
+    usage_available_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
@@ -57,6 +56,7 @@ class UsageStats:
 
     def add(self, other: "UsageStats") -> None:
         self.api_calls += other.api_calls
+        self.usage_available_calls += other.usage_available_calls
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         self.total_tokens += other.total_tokens
@@ -65,21 +65,53 @@ class UsageStats:
 
     @classmethod
     def from_response(cls, response) -> "UsageStats":
-        usage = getattr(response, "usage", None)
-        if usage is None:
-            return cls(api_calls=1)
-
-        input_details = getattr(usage, "input_tokens_details", None)
-        output_details = getattr(usage, "output_tokens_details", None)
-
+        usage = extract_usage(response)
         return cls(
             api_calls=1,
-            input_tokens=getattr(usage, "input_tokens", 0) or 0,
-            output_tokens=getattr(usage, "output_tokens", 0) or 0,
-            total_tokens=getattr(usage, "total_tokens", 0) or 0,
-            cached_input_tokens=getattr(input_details, "cached_tokens", 0) or 0,
-            reasoning_tokens=getattr(output_details, "reasoning_tokens", 0) or 0,
+            usage_available_calls=1 if usage["available"] else 0,
+            input_tokens=usage["input_tokens"],
+            output_tokens=usage["output_tokens"],
+            total_tokens=usage["total_tokens"],
+            cached_input_tokens=usage["cached_input_tokens"],
+            reasoning_tokens=usage["reasoning_tokens"],
         )
+
+
+def extract_usage(response: Any) -> dict[str, int | bool]:
+    """Extract token usage from either Responses API or Chat Completions metadata."""
+    usage = _read_response_field(response, "usage")
+    if usage is None:
+        return {
+            "available": False,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0,
+        }
+
+    input_tokens = _read_response_field(usage, "input_tokens")
+    output_tokens = _read_response_field(usage, "output_tokens")
+    total_tokens = _read_response_field(usage, "total_tokens")
+
+    if input_tokens is None and output_tokens is None:
+        input_tokens = _read_response_field(usage, "prompt_tokens")
+        output_tokens = _read_response_field(usage, "completion_tokens")
+
+    input_details = _read_response_field(usage, "input_tokens_details")
+    output_details = _read_response_field(usage, "output_tokens_details")
+
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+
+    return {
+        "available": any(value is not None for value in (input_tokens, output_tokens, total_tokens)),
+        "input_tokens": int(input_tokens or 0),
+        "output_tokens": int(output_tokens or 0),
+        "total_tokens": int(total_tokens or 0),
+        "cached_input_tokens": int(_read_response_field(input_details, "cached_tokens") or 0),
+        "reasoning_tokens": int(_read_response_field(output_details, "reasoning_tokens") or 0),
+    }
 
 
 def is_openai_configured() -> bool:
@@ -158,11 +190,10 @@ def _summarize_chunk_with_openai(
     chunk_total: int,
 ) -> tuple[str, UsageStats]:
     system_prompt = (
-        "You are an expert graduate-level study assistant. Your highest priority is factual accuracy. "
-        "Use only information explicitly supported by the uploaded lecture slides in this chunk. "
+        "You are extracting candidate concepts from lecture slides for a one-page exam cheatsheet. "
+        "Your highest priority is factual accuracy. Use only information explicitly supported by the uploaded slides in this chunk. "
         "Do not invent, generalize, repair missing meaning, or add outside knowledge. "
-        "If a fragment is uncertain, broken, duplicated, decorative, or incomplete OCR, leave it out. "
-        "Return compact extraction notes that preserve the original technical meaning."
+        "If a fragment is uncertain, broken, duplicated, decorative, or incomplete OCR, leave it out."
     )
     user_prompt = f"""
 Slide chunk {chunk_index} of {chunk_total}
@@ -173,21 +204,18 @@ Include formulas: {options.include_formulas}
 Include possible exam questions: {options.include_exam_questions}
 Include examples/findings: {options.include_examples}
 
-Extract only the useful exam-relevant information that is directly supported by this chunk.
+Extract candidate concepts, not candidate sentences.
 
-When relevant, capture:
-- Lecture title or class number
-- Agenda items or section titles
-- Key concepts
-- Definitions
-- Formulas or measures
-- Comparisons or distinctions
-- Methods, procedures, algorithms, or code logic
-- Examples, datasets, or empirical findings
-- Exam cautions or interpretation rules
+A candidate concept can be:
+- term or construct
+- measure or formula
+- model or method
+- important distinction
+- example, finding, or dataset
+- exam trap or interpretation rule
 
 Extraction rules:
-- Do not include generic headings like "Chunk 1 Highlights".
+- Do not include slide headings unless they teach a concept.
 - Do not include half-sentences or broken OCR.
 - Preserve exact technical terms.
 - Preserve formulas and numerical values exactly when present.
@@ -196,8 +224,9 @@ Extraction rules:
 
 Output format:
 - Use short markdown bullets only.
-- Do not write paragraphs.
-- Do not add headings unless they are actual slide content.
+- One bullet per concept.
+- Each bullet should include as many of these as the chunk supports: concept name, definition, interpretation, distinction, example, or exam trap.
+- Do not output random copied fragments.
 
 Source chunk:
 {chunk}
@@ -210,63 +239,66 @@ def _generate_cheatsheet_with_openai(
     chunk_summaries: list[str], options: GenerationOptions
 ) -> tuple[str, UsageStats]:
     system_prompt = (
-        "You are an expert graduate-level study assistant creating an exam-ready A4 cheatsheet from lecture slides. "
+        "You are creating a one-page exam cheatsheet from lecture slides. "
+        "You are not summarizing slides. You are teaching the important concepts in compact form. "
         "Your highest priority is factual accuracy. Use only information explicitly supported by the extracted slide notes. "
         "Do not invent, generalize, or add outside knowledge. If support is uncertain, leave it out. "
-        "Every bullet must be complete, non-duplicated, useful for exam review, and faithful to the original meaning."
+        "Every bullet must be complete, non-duplicated, understandable without the slides, and useful for exam review."
     )
     word_budget = _target_word_budget(options.target_length, options.density)
     language_hint = _language_instruction(options.output_language)
 
     user_prompt = f"""
-Create one compact, one-page-A4-style cheatsheet in markdown.
+Create one polished, one-page A4 exam cheatsheet in markdown.
 
 Course/topic: {options.course_name or "Infer from the summaries"}
 Output language: {options.output_language}
 Target length: {options.target_length}
 Approximate word budget: {word_budget}
-Focus style: {options.focus_style}
 Include examples: {options.include_examples}
 Include formulas: {options.include_formulas}
 Include possible exam questions: {options.include_exam_questions}
 Density preference: {options.density}
 
-First infer the lecture structure from the extracted notes:
-1. Lecture title / class number
-2. Agenda or main sections
-3. Key concepts
-4. Definitions
-5. Formulas or models
-6. Comparisons / distinctions
-7. Methods, procedures, or code logic
-8. Important examples, datasets, or empirical findings
-9. Exam-relevant cautions or interpretation rules
+Core requirement:
+- A good cheatsheet explains concepts clearly and fits them on one A4 page.
+- It should not simply list slide headings or copied fragments.
+- Prioritize concepts over slide order.
+- Merge repeated content.
+- If the draft is too long, keep the highest-value concepts and compress wording.
+- Do not delete definitions before deleting examples.
 
-Accuracy rules:
-- Only include facts directly supported by the extracted notes.
-- Do not include generic headings, OCR debris, or incomplete fragments.
-- Preserve exact technical terms from the slides.
-- Preserve formulas exactly when present.
-- Preserve important numerical values when present.
-- Compress wording without changing meaning.
-- Prefer omitting uncertain fragments over guessing.
-- Do not duplicate information across sections.
+For each concept, prefer this teaching format:
+- Concept name: one clear sentence explaining what it means.
+- Why it matters / how to identify it: one short sentence.
+- Exam trap: one short sentence only if useful.
 
-Output rules:
-- Use dense but readable bullets.
-- Avoid paragraphs unless absolutely necessary.
-- Use the exact section headings below, in this order, when supported by the notes.
-- If a section is not clearly supported, omit that section instead of filling it with guesses.
+Remove all bullets that are:
+- incomplete sentences
+- slide agenda items without explanation
+- generic headings
+- OCR artifacts
+- questions without answers
+- duplicated ideas
 
-Exact section headings:
-{chr(10).join(f"[{heading}]" for heading in CHEATSHEET_SECTION_ORDER)}
+Final quality check for every bullet:
+- Does this explain a concept?
+- Would a student understand it without the slides?
+- Is it useful for a quiz/exam?
+- Is it short enough for A4?
+If no, revise or delete it.
 
-Special instructions:
-- Under [Lecture / Class], state the lecture title and class number if present.
-- Under [Formulas / Measures], for each item include the name, the formula if available, what it means, and any higher/lower interpretation if explicitly given.
-- Under [Key Comparisons], explain important distinctions only when the distinction is explicitly made in the notes.
-- Under [Examples / Findings], include named cases, datasets, examples, or empirical findings only if explicitly present.
-- Under [Exam Traps / Things to Remember], include interpretation cautions, common mistakes, and likely exam-relevant reminders only if directly supported.
+Output format:
+- Start with: `# [Course / Lecture Title] - A4 Cheatsheet`
+- Use the exact section headings below, in this order, when supported:
+{chr(10).join(f"## {heading}" for heading in CHEATSHEET_SECTION_ORDER)}
+- Under `## 1. Core Concepts`, explain the key concepts clearly.
+- Under `## 2. Key Measures / Formulas`, include formula if available and say what high/low values mean when the slides support that interpretation.
+- Under `## 3. Must-Know Distinctions`, prefer a compact markdown table with columns `Concept A | Concept B | Difference`.
+- Under `## 4. Classic Examples / Findings`, include short examples only when they help clarify the concept.
+- Under `## 5. Exam Traps`, write likely multiple-choice logic, common misinterpretations, or cautions only when directly supported.
+- Do not output long paragraphs.
+- Do not output generic section labels or raw extraction fragments.
 - {language_hint}
 
 Extracted slide notes:
@@ -314,9 +346,9 @@ def _audit_cheatsheet_with_openai(
     options: GenerationOptions,
 ) -> tuple[str, UsageStats]:
     system_prompt = (
-        "You are an accuracy auditor for graduate-level study cheatsheets. "
-        "Revise the draft so that every bullet is directly supported by the lecture-slide notes, complete, "
-        "non-duplicated, correctly classified, and useful for exam review. "
+        "You are an accuracy auditor for concept-based exam cheatsheets. "
+        "Revise the draft so that it teaches concepts clearly in one-page form, while staying fully grounded in the lecture-slide notes. "
+        "Every bullet must be directly supported, complete, non-duplicated, correctly classified, and useful for exam review. "
         "If a claim is unsupported or uncertain, delete it instead of repairing it with outside knowledge."
     )
     language_hint = _language_instruction(options.output_language)
@@ -342,8 +374,11 @@ Revision rules:
 - Preserve exact technical terms, formulas, and important numerical values.
 - Keep each bullet complete and grammatically understandable.
 - Keep the final result compact enough for one A4 page.
+- Do not leave behind slide titles without explanation, questions without answers, or copied fragments.
+- Ensure every bullet teaches a concept or clarifies an interpretation.
 - Use the same exact section headings when supported:
-{chr(10).join(f"[{heading}]" for heading in CHEATSHEET_SECTION_ORDER)}
+{chr(10).join(f"## {heading}" for heading in CHEATSHEET_SECTION_ORDER)}
+- Keep the title in the format `# [Course / Lecture Title] - A4 Cheatsheet`.
 - Omit a section rather than padding it with filler.
 - {language_hint}
 
@@ -376,6 +411,14 @@ def _get_runtime_config(name: str) -> str:
     return ""
 
 
+def _read_response_field(obj: Any, name: str):
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
 def _read_streamlit_secret(*keys: str) -> str:
     if st is None:
         return ""
@@ -396,17 +439,15 @@ def _read_streamlit_secret(*keys: str) -> str:
 def _heuristic_chunk_summary(chunk: str, options: GenerationOptions, chunk_index: int) -> str:
     candidates = _collect_candidates(chunk)
     caps = _section_caps(options)
+    concept_items = _dedupe_lines(candidates["definitions"] + candidates["concepts"] + candidates["methods"])
 
     del chunk_index
     lines: list[str] = []
-    lines.extend(_format_plain_bullets(candidates["headings"], 2))
-    lines.extend(_format_plain_bullets(candidates["concepts"], caps["concepts"]))
-    lines.extend(_format_plain_bullets(candidates["definitions"], caps["definitions"]))
+    lines.extend(_format_plain_bullets(concept_items, caps["concepts"]))
 
     if options.include_formulas:
         lines.extend(_format_plain_bullets(candidates["formulas"], caps["formulas"]))
 
-    lines.extend(_format_plain_bullets(candidates["methods"], caps["methods"]))
     lines.extend(_format_plain_bullets(candidates["comparisons"], caps["comparisons"]))
 
     if options.include_exam_questions:
@@ -426,26 +467,21 @@ def _generate_cheatsheet_heuristic(
     candidates = _collect_candidates(summary_text + "\n" + source_text)
     labels = _section_labels(options.output_language)
     caps = _section_caps(options)
-    title = _resolve_title(source_text, options)
-    topic_items = candidates["headings"] or candidates["concepts"]
+    title = _resolve_display_title(source_text, options)
+    core_items = _dedupe_lines(candidates["definitions"] + candidates["concepts"] + candidates["methods"])
     exam_items = candidates["exam"]
 
-    sections: list[str] = []
-    sections.extend(_section_block(labels["lecture"], [title] if title else [], 1))
-    sections.extend(_section_block(labels["topics"], topic_items, caps["concepts"]))
-    sections.extend(_section_block(labels["definitions"], candidates["definitions"], caps["definitions"]))
+    sections: list[str] = [f"# {title} - A4 Cheatsheet", ""]
+    sections.extend(_section_block(labels["concepts"], core_items, caps["concepts"]))
 
     if options.include_formulas:
         sections.extend(_section_block(labels["formulas"], candidates["formulas"], caps["formulas"]))
 
-    sections.extend(_section_block(labels["comparisons"], candidates["comparisons"], caps["comparisons"]))
-    sections.extend(_section_block(labels["methods"], candidates["methods"], caps["methods"]))
+    sections.extend(_section_block(labels["distinctions"], candidates["comparisons"], caps["comparisons"]))
 
     if options.include_examples:
         sections.extend(_section_block(labels["examples"], candidates["examples"], caps["examples"]))
 
-    checklist_items = _build_checklist(candidates, options)
-    exam_items = _dedupe_lines(exam_items + checklist_items)
     if options.include_exam_questions:
         sections.extend(_section_block(labels["exam"], exam_items, caps["exam"]))
 
@@ -463,7 +499,7 @@ def _audit_cheatsheet_heuristic(cheatsheet_markdown: str) -> str:
                 audited_lines.append("")
             continue
 
-        if stripped.startswith("[") and stripped.endswith("]"):
+        if stripped.startswith("#"):
             if audited_lines and audited_lines[-1] == "":
                 audited_lines.pop()
             audited_lines.append(stripped)
@@ -583,7 +619,7 @@ def _section_block(
     if not selected:
         return []
 
-    section = [f"[{title}]"]
+    section = [f"## {title}"]
     section.extend(f"- {item}" for item in selected)
     section.append("")
     return section
@@ -617,41 +653,37 @@ def _resolve_title(source_text: str, options: GenerationOptions) -> str:
         if 3 <= len(candidate) <= 80 and len(candidate.split()) <= 12:
             return candidate
 
-    return "Lecture title not clearly identified"
+    return ""
+
+
+def _resolve_display_title(source_text: str, options: GenerationOptions) -> str:
+    resolved = _resolve_title(source_text, options).strip()
+    return resolved or "Exam Cheatsheet"
 
 
 def _section_labels(language: str) -> dict[str, str]:
     if language == "Chinese":
         return {
-            "lecture": "课程 / 课次",
-            "topics": "核心主题",
-            "definitions": "关键定义",
-            "formulas": "公式 / 指标",
-            "comparisons": "关键比较",
-            "methods": "方法 / 步骤",
-            "examples": "例子 / 发现",
-            "exam": "考试陷阱 / 记忆点",
+            "concepts": "1. 核心概念",
+            "formulas": "2. 公式 / 指标",
+            "distinctions": "3. 必会区分",
+            "examples": "4. 经典例子 / 发现",
+            "exam": "5. 考试陷阱",
         }
     if language == "Bilingual":
         return {
-            "lecture": "课程 / 课次 / Lecture / Class",
-            "topics": "核心主题 / Core Topics",
-            "definitions": "关键定义 / Key Definitions",
-            "formulas": "公式 / 指标 / Formulas / Measures",
-            "comparisons": "关键比较 / Key Comparisons",
-            "methods": "方法 / 步骤 / Methods / Procedures",
-            "examples": "例子 / 发现 / Examples / Findings",
-            "exam": "考试陷阱 / 记忆点 / Exam Traps / Things to Remember",
+            "concepts": "1. 核心概念 / Core Concepts",
+            "formulas": "2. 公式 / 指标 / Key Measures / Formulas",
+            "distinctions": "3. 必会区分 / Must-Know Distinctions",
+            "examples": "4. 经典例子 / 发现 / Classic Examples / Findings",
+            "exam": "5. 考试陷阱 / Exam Traps",
         }
     return {
-        "lecture": "Lecture / Class",
-        "topics": "Core Topics",
-        "definitions": "Key Definitions",
-        "formulas": "Formulas / Measures",
-        "comparisons": "Key Comparisons",
-        "methods": "Methods / Procedures",
-        "examples": "Examples / Findings",
-        "exam": "Exam Traps / Things to Remember",
+        "concepts": "1. Core Concepts",
+        "formulas": "2. Key Measures / Formulas",
+        "distinctions": "3. Must-Know Distinctions",
+        "examples": "4. Classic Examples / Findings",
+        "exam": "5. Exam Traps",
     }
 
 
