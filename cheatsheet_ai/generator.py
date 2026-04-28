@@ -6,6 +6,7 @@ import os
 import re
 import textwrap
 import json
+import math
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -194,15 +195,25 @@ def extract_concepts(
 
     if is_openai_configured():
         chunk_candidates: list[dict[str, Any]] = []
-        for index, chunk in enumerate(chunks, start=1):
+        batched_chunks = _group_chunks_for_concept_extraction(chunks)
+        for index, chunk in enumerate(batched_chunks, start=1):
             try:
-                result = _extract_chunk_concepts_with_openai(chunk, options, index, len(chunks))
+                result = _extract_chunk_concepts_with_openai(chunk, options, index, len(batched_chunks))
                 usage_totals.add(result.to_usage_stats())
                 parsed = result.parsed_json or {}
-                chunk_candidates.extend(_normalize_concept_records(parsed.get("concepts", [])))
+                normalized = _normalize_concept_records(parsed.get("concepts", []))
+                if not normalized:
+                    _record_pipeline_error(
+                        "extraction",
+                        RuntimeError("OpenAI concept extraction returned no parseable concepts."),
+                        {"batch_index": index, "batch_total": len(batched_chunks), "output_preview": result.text[:400]},
+                    )
+                    continue
+                chunk_candidates.extend(normalized)
             except Exception:
                 continue
-        return chunk_candidates, usage_totals
+        if chunk_candidates:
+            return chunk_candidates, usage_totals
 
     return _extract_concepts_heuristic(source_text or "\n\n".join(chunks), options), usage_totals
 
@@ -222,7 +233,14 @@ def clean_concepts(
             result = _clean_concepts_with_openai(concept_inventory, options, source_text or "")
             usage_totals.add(result.to_usage_stats())
             cleaned = _normalize_concept_records((result.parsed_json or {}).get("concepts", []))
-            return _prioritize_concepts(_finalize_concept_records(cleaned), options), usage_totals
+            cleaned = _prioritize_concepts(_finalize_concept_records(cleaned), options)
+            if cleaned:
+                return cleaned, usage_totals
+            _record_pipeline_error(
+                "cleaning",
+                RuntimeError("OpenAI concept cleaning returned no usable concepts."),
+                {"candidate_count": len(concept_inventory), "output_preview": result.text[:400]},
+            )
         except Exception:
             pass
 
@@ -290,6 +308,13 @@ def summarize_chunks(chunks: list[str], options: GenerationOptions) -> tuple[lis
         if is_openai_configured():
             try:
                 result = _summarize_chunk_with_openai(chunk, options, index, len(chunks))
+                if not result.text.strip():
+                    _record_pipeline_error(
+                        "extraction",
+                        RuntimeError("OpenAI chunk summarization returned empty output."),
+                        {"chunk_index": index, "chunk_total": len(chunks)},
+                    )
+                    raise RuntimeError("Empty chunk summary.")
                 summaries.append(result.text)
                 usage_totals.add(result.to_usage_stats())
                 continue
@@ -313,7 +338,13 @@ def generate_cheatsheet(
     if is_openai_configured():
         try:
             result = _generate_cheatsheet_with_openai(chunk_summaries, options)
-            return result.text, result.to_usage_stats()
+            if _has_substantive_cheatsheet(result.text):
+                return result.text, result.to_usage_stats()
+            _record_pipeline_error(
+                "generation",
+                RuntimeError("OpenAI generation returned empty or title-only output."),
+                {"mode": "legacy_generation", "output_preview": result.text[:400]},
+            )
         except Exception:
             pass
 
@@ -333,7 +364,13 @@ def audit_cheatsheet(
     if is_openai_configured():
         try:
             result = _audit_cheatsheet_with_openai(cheatsheet_markdown, chunk_summaries, options)
-            return result.text, result.to_usage_stats()
+            if _has_substantive_cheatsheet(result.text):
+                return result.text, result.to_usage_stats()
+            _record_pipeline_error(
+                "audit",
+                RuntimeError("OpenAI audit returned empty or title-only output."),
+                {"mode": "legacy_audit", "output_preview": result.text[:400]},
+            )
         except Exception:
             pass
 
@@ -350,7 +387,13 @@ def generate_cheatsheet_from_concepts(
     if is_openai_configured():
         try:
             result = _generate_concept_cheatsheet_with_openai(concepts, options)
-            return result.text, result.to_usage_stats()
+            if _has_substantive_cheatsheet(result.text):
+                return result.text, result.to_usage_stats()
+            _record_pipeline_error(
+                "generation",
+                RuntimeError("OpenAI concept generation returned empty or title-only output."),
+                {"mode": "concept_generation", "output_preview": result.text[:400], "concept_count": len(concepts)},
+            )
         except Exception:
             pass
 
@@ -367,7 +410,13 @@ def audit_cheatsheet_from_concepts(
     if is_openai_configured():
         try:
             result = _audit_concept_cheatsheet_with_openai(cheatsheet_markdown, concepts, options)
-            return result.text, result.to_usage_stats()
+            if _has_substantive_cheatsheet(result.text):
+                return result.text, result.to_usage_stats()
+            _record_pipeline_error(
+                "audit",
+                RuntimeError("OpenAI concept audit returned empty or title-only output."),
+                {"mode": "concept_audit", "output_preview": result.text[:400], "concept_count": len(concepts)},
+            )
         except Exception:
             pass
 
@@ -775,9 +824,21 @@ def _call_openai(
     if tool_choice:
         request_kwargs["tool_choice"] = tool_choice
 
-    response = client.responses.create(
-        **request_kwargs,
-    )
+    request_context = {
+        "model": model_name,
+        "max_output_tokens": max_output_tokens,
+        "tools": tools or [],
+        "include": include or [],
+        "text_format": text_format or {},
+        "tool_choice": tool_choice or "",
+    }
+    try:
+        response = client.responses.create(
+            **request_kwargs,
+        )
+    except Exception as exc:
+        _record_pipeline_error(step_name, exc, request_context)
+        raise
     usage = extract_usage(response)
     raw_usage = _serialize_debug_object(_read_response_field(response, "usage"))
     response_keys = _extract_response_keys(response)
@@ -1038,6 +1099,62 @@ def _empty_token_usage_payload(model_name: str = "") -> dict[str, Any]:
     }
 
 
+def _record_pipeline_error(
+    step_name: str,
+    exc: Exception,
+    context: dict[str, Any] | None = None,
+) -> None:
+    if st is None:
+        return
+
+    try:
+        payload = st.session_state.get("token_usage")
+    except Exception:
+        return
+
+    if not isinstance(payload, dict):
+        payload = _empty_token_usage_payload(get_openai_model() if is_openai_configured() else "")
+
+    debug_payload = payload.setdefault(
+        "debug",
+        {
+            "extraction": [],
+            "cleaning": [],
+            "web_clarification": [],
+            "generation": [],
+            "audit": [],
+        },
+    )
+    step_debug = debug_payload.setdefault(step_name, [])
+    step_debug.append(
+        {
+            "event_type": "error",
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "context": _serialize_debug_object(context),
+        }
+    )
+    st.session_state["token_usage"] = payload
+
+    try:
+        pipeline_errors = st.session_state.get("pipeline_errors")
+    except Exception:
+        return
+
+    if not isinstance(pipeline_errors, dict):
+        pipeline_errors = {}
+    step_errors = pipeline_errors.setdefault(step_name, [])
+    if len(step_errors) < 12:
+        step_errors.append(
+            {
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "context": _serialize_debug_object(context),
+            }
+        )
+    st.session_state["pipeline_errors"] = pipeline_errors
+
+
 def _record_token_usage(step_name: str, result: LLMCallResult) -> None:
     if st is None:
         return
@@ -1074,6 +1191,7 @@ def _record_token_usage(step_name: str, result: LLMCallResult) -> None:
     step_debug = debug_payload.setdefault(step_name, [])
     step_debug.append(
         {
+            "event_type": "usage",
             "model": result.model,
             "response_type": result.response_type,
             "response_keys": result.response_keys,
@@ -1203,6 +1321,8 @@ def _extract_concepts_heuristic(source_text: str, options: GenerationOptions) ->
         + candidates["examples"]
         + candidates["exam"]
     )
+    if not concept_pool:
+        concept_pool = _fallback_concept_candidates(source_text)
     limit = _concept_limit(options)
     records: list[dict[str, Any]] = []
 
@@ -1299,6 +1419,15 @@ def _generate_concept_cheatsheet_heuristic(
 
         if trap or category == "exam_trap":
             exam_lines.append(_build_supporting_bullet(name, trap))
+
+    if not any((core_lines, formula_lines, distinction_rows, example_lines, exam_lines)):
+        fallback_lines = _fallback_concept_candidates(
+            source_text
+            or "\n".join(_safe_text(concept.get("slide_context")) for concept in concepts),
+            max_items=max(12, _section_caps(options)["concepts"] + _section_caps(options)["formulas"]),
+        )
+        for line in fallback_lines[: _section_caps(options)["concepts"]]:
+            core_lines.append(line)
 
     lines: list[str] = [f"# {title} - A4 Cheatsheet", ""]
     lines.extend(_section_block(labels["concepts"], core_lines, _section_caps(options)["concepts"]))
@@ -1681,6 +1810,12 @@ def _resolve_title(source_text: str, options: GenerationOptions) -> str:
 
     for line in source_text.splitlines():
         candidate = _strip_markdown(line.strip())
+        if not candidate or candidate.lower().startswith("source:"):
+            continue
+        if _looks_like_formula(candidate) or _looks_like_definition(candidate):
+            continue
+        if candidate.endswith((".", "!", "?")):
+            continue
         if 3 <= len(candidate) <= 80 and len(candidate.split()) <= 12:
             return candidate
 
@@ -1847,3 +1982,49 @@ def _looks_incomplete(text: str) -> bool:
     if text.count("[") != text.count("]"):
         return True
     return False
+
+
+def _group_chunks_for_concept_extraction(chunks: list[str], max_batches: int = 12) -> list[str]:
+    if len(chunks) <= max_batches:
+        return chunks
+
+    group_size = max(1, math.ceil(len(chunks) / max_batches))
+    return [
+        "\n\n".join(chunks[index : index + group_size]).strip()
+        for index in range(0, len(chunks), group_size)
+        if "\n\n".join(chunks[index : index + group_size]).strip()
+    ]
+
+
+def _fallback_concept_candidates(source_text: str, max_items: int = 36) -> list[str]:
+    candidates: list[str] = []
+    for raw_line in source_text.splitlines():
+        plain = _strip_markdown(raw_line)
+        if not plain or plain.lower().startswith("source:"):
+            continue
+        if _looks_like_generic_filler(plain) or _looks_incomplete(plain):
+            continue
+        word_count = len(plain.split())
+        if 3 <= word_count <= 28:
+            candidates.append(plain)
+        if len(candidates) >= max_items:
+            break
+    return _dedupe_lines(candidates)
+
+
+def _has_substantive_cheatsheet(markdown: str) -> bool:
+    if not markdown or not markdown.strip():
+        return False
+
+    lines = [line.strip() for line in markdown.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return False
+
+    bullet_or_table_lines = [
+        line
+        for line in lines
+        if line.startswith("- ")
+        or line.startswith("| ")
+        or re.match(r"^\|\s*[^|]+\|", line)
+    ]
+    return len(bullet_or_table_lines) >= 2

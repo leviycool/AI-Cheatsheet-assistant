@@ -190,6 +190,7 @@ def _generate_from_existing_text(options: GenerationOptions) -> None:
 def _run_generation_pipeline(options: GenerationOptions) -> None:
     cleaned_text = st.session_state.get("cleaned_text", "")
     chunks = chunk_text(cleaned_text)
+    st.session_state["pipeline_errors"] = {}
     st.session_state["token_usage"] = _empty_token_usage_state(get_openai_model() if is_openai_configured() else "")
     (
         concept_inventory,
@@ -208,7 +209,7 @@ def _run_generation_pipeline(options: GenerationOptions) -> None:
     total_usage.add(web_usage)
     total_usage.add(generation_usage)
     total_usage.add(audit_usage)
-    model_name = get_openai_model() if total_usage.api_calls else ""
+    model_name = get_openai_model() if is_openai_configured() else ""
     token_usage = st.session_state.get("token_usage", _empty_token_usage_state(model_name))
     debug_info = token_usage.get("debug", _empty_token_usage_state().get("debug", {}))
 
@@ -323,6 +324,13 @@ def display_result() -> None:
     stats_columns[0].metric("Source words", st.session_state.get("source_word_count", 0))
     stats_columns[1].metric("Chunks", st.session_state.get("chunk_count", 0))
     stats_columns[2].metric("Mode", "OpenAI" if is_openai_configured() else "Heuristic")
+
+    pipeline_error_count = _count_pipeline_errors(st.session_state.get("pipeline_errors", {}))
+    if pipeline_error_count:
+        st.warning(
+            f"{pipeline_error_count} OpenAI step(s) failed during this run. "
+            "The app used fallbacks where possible. Expand `Token Usage` and enable debug info to inspect the errors."
+        )
 
     tabs = st.tabs(["Edit", "Preview", "Source Preview"])
 
@@ -486,6 +494,8 @@ def _slugify_filename(name: str) -> str:
 def _render_token_usage() -> None:
     usage = st.session_state.get("token_usage", {})
     total = usage.get("total", {})
+    pipeline_errors = st.session_state.get("pipeline_errors", {})
+    pipeline_error_count = _count_pipeline_errors(pipeline_errors)
 
     if not usage:
         return
@@ -496,14 +506,28 @@ def _render_token_usage() -> None:
         show_debug = st.checkbox("Show raw usage debug info", key="show_raw_usage_debug")
 
         if not total.get("api_calls", 0):
-            st.info("No API usage was recorded for this run.")
+            if pipeline_error_count:
+                st.warning(
+                    f"No API usage was recorded because {pipeline_error_count} OpenAI call(s) failed before "
+                    "returning usage metadata. The app fell back to local generation where possible."
+                )
+            else:
+                st.info("No API usage was recorded for this run.")
             if show_debug:
+                if pipeline_errors:
+                    st.markdown("**Pipeline errors**")
+                    st.json(pipeline_errors)
+                st.markdown("**Usage debug**")
                 st.json(usage.get("debug", {}))
             return
 
         if not usage.get("available", False):
             st.info("Token usage not available for this request.")
             if show_debug:
+                if pipeline_errors:
+                    st.markdown("**Pipeline errors**")
+                    st.json(pipeline_errors)
+                st.markdown("**Usage debug**")
                 st.json(usage.get("debug", {}))
             return
 
@@ -552,7 +576,17 @@ def _render_token_usage() -> None:
         extra_columns[0].metric("Cached input", _format_number(total.get("cached_input_tokens", 0)))
         extra_columns[1].metric("Reasoning tokens", _format_number(total.get("reasoning_tokens", 0)))
 
+        if pipeline_error_count:
+            st.caption(
+                f"{pipeline_error_count} pipeline error(s) were recorded. "
+                "Some steps may have fallen back to heuristic generation."
+            )
+
         if show_debug:
+            if pipeline_errors:
+                st.markdown("**Pipeline errors**")
+                st.json(pipeline_errors)
+            st.markdown("**Usage debug**")
             st.json(usage.get("debug", {}))
 
 
@@ -677,6 +711,12 @@ def _get_pricing_for_model(model_name: str) -> dict[str, float] | None:
             return pricing
 
     return None
+
+
+def _count_pipeline_errors(errors: object) -> int:
+    if not isinstance(errors, dict):
+        return 0
+    return sum(len(value) for value in errors.values() if isinstance(value, list))
 
 
 if __name__ == "__main__":
