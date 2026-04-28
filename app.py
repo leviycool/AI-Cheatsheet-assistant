@@ -7,6 +7,7 @@ from dataclasses import asdict
 
 import streamlit as st
 
+from cheatsheet_ai import generator as generator_module
 from cheatsheet_ai.extractors import (
     extract_text_from_docx,
     extract_text_from_pdf,
@@ -14,18 +15,13 @@ from cheatsheet_ai.extractors import (
     extract_text_from_txt,
 )
 from cheatsheet_ai.exporters import export_to_docx, export_to_markdown, export_to_pdf
-from cheatsheet_ai.generator import (
-    GenerationOptions,
-    UsageStats,
-    audit_cheatsheet_from_concepts,
-    clarify_concepts,
-    clean_concepts,
-    extract_concepts,
-    generate_cheatsheet_from_concepts,
-    get_openai_model,
-    is_openai_configured,
-)
 from cheatsheet_ai.processing import chunk_text, clean_extracted_text
+
+
+GenerationOptions = generator_module.GenerationOptions
+UsageStats = generator_module.UsageStats
+get_openai_model = generator_module.get_openai_model
+is_openai_configured = generator_module.is_openai_configured
 
 
 SUPPORTED_FILE_TYPES = ["pdf", "pptx", "docx", "txt"]
@@ -195,11 +191,17 @@ def _run_generation_pipeline(options: GenerationOptions) -> None:
     cleaned_text = st.session_state.get("cleaned_text", "")
     chunks = chunk_text(cleaned_text)
     st.session_state["token_usage"] = _empty_token_usage_state(get_openai_model() if is_openai_configured() else "")
-    concept_inventory, extraction_usage = extract_concepts(chunks, options, source_text=cleaned_text)
-    concepts, cleaning_usage = clean_concepts(concept_inventory, options, source_text=cleaned_text)
-    concepts, web_usage = clarify_concepts(concepts, options)
-    draft_markdown, generation_usage = generate_cheatsheet_from_concepts(concepts, options, source_text=cleaned_text)
-    cheatsheet_markdown, audit_usage = audit_cheatsheet_from_concepts(draft_markdown, concepts, options)
+    (
+        concept_inventory,
+        concepts,
+        cheatsheet_markdown,
+        extraction_usage,
+        cleaning_usage,
+        web_usage,
+        generation_usage,
+        audit_usage,
+    ) = _generate_with_best_available_pipeline(chunks, cleaned_text, options)
+
     total_usage = UsageStats()
     total_usage.add(extraction_usage)
     total_usage.add(cleaning_usage)
@@ -232,6 +234,79 @@ def _run_generation_pipeline(options: GenerationOptions) -> None:
         "pricing_configured": _get_pricing_for_model(model_name) is not None,
         "debug": debug_info,
     }
+
+
+def _generate_with_best_available_pipeline(
+    chunks: list[str],
+    cleaned_text: str,
+    options: GenerationOptions,
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, object]],
+    str,
+    UsageStats,
+    UsageStats,
+    UsageStats,
+    UsageStats,
+    UsageStats,
+]:
+    extract_concepts_fn = getattr(generator_module, "extract_concepts", None)
+    clean_concepts_fn = getattr(generator_module, "clean_concepts", None)
+    clarify_concepts_fn = getattr(generator_module, "clarify_concepts", None)
+    clarify_with_web_fn = getattr(generator_module, "clarify_concepts_with_web", None)
+    generate_from_concepts_fn = getattr(generator_module, "generate_cheatsheet_from_concepts", None)
+    audit_from_concepts_fn = getattr(generator_module, "audit_cheatsheet_from_concepts", None)
+
+    if all(
+        callable(fn)
+        for fn in (
+            extract_concepts_fn,
+            clean_concepts_fn,
+            generate_from_concepts_fn,
+            audit_from_concepts_fn,
+        )
+    ):
+        concept_inventory, extraction_usage = extract_concepts_fn(chunks, options, source_text=cleaned_text)
+        concepts, cleaning_usage = clean_concepts_fn(concept_inventory, options, source_text=cleaned_text)
+
+        if callable(clarify_concepts_fn):
+            concepts, web_usage = clarify_concepts_fn(concepts, options)
+        elif callable(clarify_with_web_fn):
+            concepts, web_usage = clarify_with_web_fn(concepts, options)
+        else:
+            web_usage = UsageStats()
+
+        draft_markdown, generation_usage = generate_from_concepts_fn(concepts, options, source_text=cleaned_text)
+        cheatsheet_markdown, audit_usage = audit_from_concepts_fn(draft_markdown, concepts, options)
+        return (
+            concept_inventory,
+            concepts,
+            cheatsheet_markdown,
+            extraction_usage,
+            cleaning_usage,
+            web_usage,
+            generation_usage,
+            audit_usage,
+        )
+
+    summarize_chunks_fn = getattr(generator_module, "summarize_chunks")
+    generate_cheatsheet_fn = getattr(generator_module, "generate_cheatsheet")
+    audit_cheatsheet_fn = getattr(generator_module, "audit_cheatsheet")
+    summaries, extraction_usage = summarize_chunks_fn(chunks, options)
+    cheatsheet_draft, generation_usage = generate_cheatsheet_fn(summaries, options, source_text=cleaned_text)
+    cheatsheet_markdown, audit_usage = audit_cheatsheet_fn(cheatsheet_draft, summaries, options)
+    concept_inventory = _concept_inventory_from_summaries(summaries)
+    concepts = list(concept_inventory)
+    return (
+        concept_inventory,
+        concepts,
+        cheatsheet_markdown,
+        extraction_usage,
+        UsageStats(),
+        UsageStats(),
+        generation_usage,
+        audit_usage,
+    )
 
 
 def _store_extraction_state(extracted_by_file: list[dict[str, str]], combined_text: str) -> None:
@@ -356,6 +431,47 @@ def parse_slides(uploaded_files) -> tuple[list[dict[str, str]], str]:
 
     combined_text = clean_extracted_text("\n\n".join(cleaned_sections)) if cleaned_sections else ""
     return extracted_by_file, combined_text
+
+
+def _concept_inventory_from_summaries(summaries: list[str]) -> list[dict[str, object]]:
+    concepts: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    for summary in summaries:
+        for raw_line in summary.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("- "):
+                continue
+            text = line[2:].strip()
+            key = text.lower()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            concepts.append(
+                {
+                    "concept": text.split(":", 1)[0].strip() if ":" in text else text[:60].strip(),
+                    "category": "definition",
+                    "kind": "definition",
+                    "slide_context": text,
+                    "appears_in_slides": True,
+                    "importance": "medium",
+                    "needs_web_clarification": False,
+                    "reason_for_clarification": "",
+                    "final_explanation": text,
+                    "definition_from_slides": text,
+                    "why_it_matters": "",
+                    "formula_or_measure": "",
+                    "distinction": "",
+                    "example_or_finding": "",
+                    "exam_trap": "",
+                    "web_definition": "",
+                    "final_definition": text,
+                    "web_source_title": "",
+                    "web_source_url": "",
+                    "sources": [],
+                }
+            )
+    return concepts
 
 
 def _has_cleaned_text() -> bool:
