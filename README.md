@@ -18,6 +18,7 @@ make run
 
 当前这个目录在本机是用 `Python 3.8.2` 运行的，所以我已经把 `Streamlit` 依赖约束调整为与 `Python 3.8` 兼容的版本范围。
 如果你以后切到 `Python 3.9+`，也可以再把 `streamlit` 版本升级到更新的分支。
+现在 `requirements.txt` 已经按 Python 版本做了兼容处理：本地 `3.8` 会安装兼容版本，云端 `3.9+` 会安装较新的 `Streamlit`。
 
 ## 手动搭建 Streamlit
 
@@ -58,6 +59,25 @@ OPENAI_MODEL = "gpt-4.1-mini"
 ```
 
 如果没有配置 OpenAI Key，应用也能运行，只是会自动切到本地启发式模式，生成质量会弱一些。
+
+### Streamlit Cloud 里怎么填
+
+你截图里的 `Advanced settings -> Secrets` 文本框，直接粘贴下面两行就可以：
+
+```toml
+OPENAI_API_KEY = "sk-你的真实key"
+OPENAI_MODEL = "gpt-4.1-mini"
+```
+
+也支持这种分组写法：
+
+```toml
+[openai]
+api_key = "sk-你的真实key"
+model = "gpt-4.1-mini"
+```
+
+这两种格式项目都已经支持，而且 `secrets` 不会进入 Git 仓库。
 
 ## 项目结构
 
