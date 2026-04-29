@@ -198,4 +198,4 @@ README.md
 
 ## License
 
-Add your preferred license here before publishing broadly.
+This project is released under the MIT License. See [LICENSE](LICENSE).
